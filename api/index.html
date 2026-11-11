@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Galaxy Sim — планета</title>
+<style>
+  body { font-family: monospace; background: #1e1e1e; color: #ddd; margin: 20px; }
+  input { background: #333; color: #ddd; border: 1px solid #555; padding: 4px; width: 80px; }
+  button { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 12px; cursor: pointer; }
+  button:hover { background: #444; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  th, td { border: 1px solid #444; padding: 4px 10px; text-align: right; }
+  th { background: #2a2a2a; color: #aaa; font-weight: normal; }
+  tr:hover { background: #2a2a2a; }
+  .up { color: #6f6; }
+  .down { color: #f66; }
+  .day { font-size: 1.2em; color: #8cf; margin-bottom: 8px; }
+  .controls { margin-bottom: 12px; }
+  #news { max-height: 300px; overflow-y: auto; border: 1px solid #444; padding: 8px; margin-top: 8px; font-size: 0.9em; }
+  #news div { border-bottom: 1px solid #333; padding: 2px 0; }
+  .topbar { margin-bottom: 12px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .topbar .stat { color: #aaa; }
+  .tables { display: flex; gap: 16px; flex-wrap: wrap; }
+  .ptable { border: 1px solid #444; padding: 8px; background: #222; }
+  .ptable .phead { cursor: pointer; }
+  .ptable.active { border-color: #8cf; }
+  .ptable .phead { margin-bottom: 6px; color: #8cf; }
+  .ptable .phead button { background: #333; color: #ddd; border: 1px solid #555; cursor: pointer; padding: 0 6px; }
+  .ptable .ptype { color: #aaa; margin-left: 6px; font-size: 0.9em; }
+  .illegal { color: #f66; }
+  .tp-high { color: #6f6; }
+  .tp-low  { color: #f66; }
+  table, th, td { user-select: text; }
+  button { user-select: none; }
+  .pinput { width: 70px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="day">date: <span id="day">—</span></span>
+  <span class="stat">GalTech: <span id="galtech">—</span></span>
+
+  <button id="toggle">стоп</button>
+  <button id="chatBtn">Chat</button>
+
+  <span class="stat" style="border-left: 1px solid #555; padding-left: 16px;">
+    Sector: <span id="activeSector">—</span>
+  </span>
+  <span class="stat">Star: <span id="activeStar">—</span></span>
+  <span class="stat">Planet: <span id="activePlanet">—</span></span>
+  <span class="stat">Tech: <span id="activeTech">—</span></span>
+  <span class="stat">Race: <span id="activeRace">—</span></span>
+  <span class="stat">Eco: <span id="activeEconomy">—</span></span>
+  <span class="stat">Pol: <span id="activeGov">—</span></span>
+  <span class="stat">Pop: <span id="activePop">—</span></span>
+  <span class="stat">Money: <span id="activeMoney">—</span></span>
+</div>
+
+<div class="tables" id="tables"></div>
+
+<h3>Карта галактики / система</h3>
+<div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+  <canvas id="map" width="800" height="560" style="border:1px solid #444; background:#111;"></canvas>
+  <canvas id="sector" width="460" height="460" style="border:1px solid #444; background:#111;"></canvas>
+</div>
+
+<h3>Новости (общие)</h3>
+<div id="news"></div>
+
+<script>
+const GOOD_NAMES = ["food","medicine","technics","luxury","minerals","alcohol","arms","narcotics"];
+
+let running = true;
+let habitable = [];
+let planets = [0, 0, 0];
+let active = 0;
+
+let mapSelectedStar = -1;   // выбранная звезда на карте
+let mapStarsCache = [];     // звёзды для клика (из /map)
+
+async function loadHabitable() {
+  const r = await fetch("/habitable");
+  habitable = await r.json();
+  planets = [0,1,2].map(() => habitable[Math.floor(Math.random()*habitable.length)]);
+}
+
+function movePlanet(slot, dir) {
+  if (!habitable.length) return;
+  let idx = habitable.indexOf(planets[slot]);
+  if (idx < 0) idx = 0;
+  idx = (idx + dir + habitable.length) % habitable.length;
+  planets[slot] = habitable[idx];
+  if (slot === active) updateActiveFromCache();
+  renderTablesSoon();
+}
+
+function dayToDate(day) {
+  const DAYS_IN_MONTH = 36;
+  const MONTHS_IN_YEAR = 16;
+  const DAYS_IN_YEAR = DAYS_IN_MONTH * MONTHS_IN_YEAR;
+  const YEAR_BASE = 3300;
+  const year = YEAR_BASE + Math.floor(day / DAYS_IN_YEAR);
+  const dayOfYear = day % DAYS_IN_YEAR;
+  const month = Math.floor(dayOfYear / DAYS_IN_MONTH);
+  const dayOfMonth = (dayOfYear % DAYS_IN_MONTH) + 1;
+  const dd = String(dayOfMonth).padStart(2, "0");
+  const mm = "0x" + month.toString(16).toUpperCase().padStart(2, "0");
+  return `${dd}/${mm}/${year}`;
+}
+
+async function pollWorld() {
+  try {
+    const r = await fetch("/world");
+    const w = await r.json();
+	worldDay = w.day;
+	document.getElementById("day").textContent = dayToDate(w.day);
+	document.getElementById("galtech").textContent = "0x" + w.galTech.toString(16).toUpperCase().padStart(2, "0");
+// караваны/пираты — вывод выключен, элементы удалены из topbar. Позже пригодятся.
+// document.getElementById("caravans").textContent = w.caravans;
+// document.getElementById("pirates").textContent = w.pirates;
+  } catch (e) { console.error(e); }
+  setTimeout(pollWorld, 1000);
+}
+
+let cache = {};
+
+let systemCache = {}; // starID → SystemJSON
+
+let worldDay = 0;          // из pollWorld
+let sectorSys = null;      // текущая система для анимации
+let sectorSelected = -1;   // выделенная планета
+let previewTargetID = null; // куда летим (для предпросмотра Безье)
+const PLANET_COLORS = ["#e05555", "#55c855", "#b05ad0", "#5a9ae0", "#e0c040"]; // Maloc/Peleng/Feyan/Human/Gaal
+const ORBIT_K = 0.05;      // подберём
+
+let lastDrawCX = 0;
+let lastDrawCY = 0;
+let lastDrawScale = 1;
+
+async function loadSystem(starID) {
+  if (systemCache[starID]) return systemCache[starID];
+  try {
+    const r = await fetch("/system/" + starID);
+    if (r.ok) systemCache[starID] = await r.json();
+  } catch (e) { console.error("system fetch", e); }
+  return systemCache[starID];
+}
+
+async function pollPlanets() {
+  if (!running) { setTimeout(pollPlanets, 500); return; }
+  const unique = [...new Set(planets)];
+  await Promise.all(unique.map(async id => {
+    try {
+      const r = await fetch("/planet/" + id);
+      if (r.ok) cache[id] = await r.json();
+    } catch (e) { console.error(e); }
+  }));
+  renderTables();
+  updateActiveFromCache();
+  setTimeout(pollPlanets, 1000);
+}
+
+function renderTables() {
+  const box = document.getElementById("tables");
+  box.innerHTML = "";
+  for (let slot = 0; slot < 3; slot++) {
+    const id = planets[slot];
+    const p = cache[id];
+    const div = document.createElement("div");
+    div.className = "ptable" + (slot === active ? " active" : "");
+    const techHex = p ? "0x" + p.techLevel.toString(16).toUpperCase().padStart(2, "0") : "?";
+    const moneyStr = p ? p.money.toFixed(0) : "?";
+    const info = p
+      ? `${techHex} | ${p.raceName} : ${p.government} / ${p.economy} / ${moneyStr}`
+      : "?";
+    div.innerHTML = `
+      <div class="phead">
+        <button data-slot="${slot}" data-dir="-1">&lt;</button>
+        <input class="pinput" data-slot="${slot}" type="number" min="0" value="${id}">
+        <button data-slot="${slot}" data-dir="1">&gt;</button>
+        <span class="ptype">${info}</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th><th>delta</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>`;
+    const tb = div.querySelector("tbody");
+    if (p) {
+      for (const m of p.market) {
+        const tr = document.createElement("tr");
+        const mark = m.legal ? "" : "* ";
+        const cls = m.legal ? "" : ' class="illegal"';
+        const d = m.delta || 0;
+        const dCls = d > 0 ? ' class="up"' : (d < 0 ? ' class="down"' : '');
+        tr.innerHTML = `<td${cls}>${mark}${GOOD_NAMES[m.good]}</td>
+          <td>${m.purchasePrice.toFixed(1)}</td>
+          <td>${m.baseSalePrice.toFixed(1)}</td>
+          <td>${m.count}</td>
+          <td>${m.targetStock}</td>
+          <td${dCls}>${d.toFixed(1)}</td>`;
+        tb.appendChild(tr);
+      }
+    } else {
+      for (let g = 0; g < GOOD_NAMES.length; g++) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${GOOD_NAMES[g]}</td><td>?</td><td>?</td><td>?</td><td>?</td><td>?</td>`;
+        tb.appendChild(tr);
+      }
+    }
+    const head = div.querySelector(".phead");
+    if (head) {
+      head.addEventListener("click", () => { active = slot; renderTables(); updateActiveFromCache(); });
+    }
+    box.appendChild(div);
+  }
+  document.querySelectorAll("#tables button[data-dir]").forEach(b => {
+    b.addEventListener("click", ev => {
+      ev.stopPropagation();
+      movePlanet(parseInt(b.dataset.slot), parseInt(b.dataset.dir));
+    });
+  });
+  document.querySelectorAll("#tables input.pinput").forEach(inp => {
+    inp.addEventListener("click", ev => ev.stopPropagation());
+    inp.addEventListener("change", ev => {
+      ev.stopPropagation();
+      const slot = parseInt(inp.dataset.slot);
+      let id = parseInt(inp.value);
+      if (isNaN(id) || id < 0) {
+        inp.value = planets[slot];
+        return;
+      }
+      planets[slot] = id;
+      if (slot === active) updateActiveFromCache();
+      renderTablesSoon();
+    });
+  });
+}
+
+function updateActiveFromCache() {
+  const id = planets[active];
+  const p = cache[id];
+  document.getElementById("activePlanet").textContent = id;
+  if (p) {
+    document.getElementById("activeSector").textContent = p.sector;
+    document.getElementById("activeStar").textContent = p.star;
+    document.getElementById("activeTech").textContent = "0x" + p.techLevel.toString(16).toUpperCase().padStart(2, "0");
+    document.getElementById("activeEconomy").textContent = p.economy;
+    document.getElementById("activeRace").textContent = p.raceName;
+    document.getElementById("activeGov").textContent = p.government;
+    let popStr = p.pop.toString();
+    if (p.pop >= 1000000) popStr = (p.pop / 1000000).toFixed(2) + "M";
+    else if (p.pop >= 1000) popStr = (p.pop / 1000).toFixed(1) + "k";
+    document.getElementById("activePop").textContent = popStr;
+    document.getElementById("activeMoney").textContent = p.money.toFixed(0);
+  } else {
+    for (const k of ["activeSector","activeStar","activeTech","activeEconomy","activeRace","activeGov","activePop","activeMoney"]) {
+      document.getElementById(k).textContent = "—";
+    }
+  }
+  updateSector();
+}
+
+function renderTablesSoon() { renderTables(); }
+
+let lastNewsDay = 0;
+async function pollNews() {
+  try {
+    const r = await fetch("/news?since=" + lastNewsDay);
+    const arr = await r.json();
+    if (arr.length > 0) {
+      const box = document.getElementById("news");
+      for (const e of arr) {
+        const div = document.createElement("div");
+        const g = GOOD_NAMES[e.good] || e.good;
+        div.textContent = `day ${e.day} [${e.kind}] star=${e.star} good=${g}`;
+        box.prepend(div);
+        if (e.day > lastNewsDay) lastNewsDay = e.day;
+      }
+      while (box.children.length > 200) box.removeChild(box.lastChild);
+    }
+  } catch (e) { console.error(e); }
+  setTimeout(pollNews, 2000);
+}
+
+document.getElementById("toggle").addEventListener("click", () => {
+  running = !running;
+  document.getElementById("toggle").textContent = running ? "стоп" : "старт";
+});
+
+// Chat — отдельное окно, фиксируется на активной планете в момент клика.
+// Имя 'gs-chat' → повторный клик фокусирует уже открытое окно, не плодит новые.
+document.getElementById("chatBtn").addEventListener("click", () => {
+  const id = planets[active];
+  const url = "/chat?planet=" + encodeURIComponent(id);
+  window.open(url, "gs-chat", "width=420,height=760");
+});
+
+// ---------- Карта галактики (1+4: convex hull + цвет) ----------
+function convexHull(points) {
+  const pts = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  if (pts.length <= 1) return pts;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
+}
+
+function sectorColor(sec, n) {
+  const hue = (sec * 137.508) % 360;
+  return `hsla(${hue}, 65%, 55%, 0.18)`;
+}
+function sectorStroke(sec, n) {
+  const hue = (sec * 137.508) % 360;
+  return `hsla(${hue}, 65%, 60%, 0.6)`;
+}
+
+async function drawMap() {
+  const canvas = document.getElementById("map");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  let data;
+  try {
+    const r = await fetch("/map");
+    data = await r.json();
+  } catch (e) { console.error("map fetch", e); return; }
+  mapStarsCache = data.stars;
+
+  const S = 2;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const N = data.seeds.length;
+  const bySector = new Map();
+  for (const st of data.stars) {
+    if (!bySector.has(st.sector)) bySector.set(st.sector, []);
+    bySector.get(st.sector).push({ x: st.x * S, y: st.y * S });
+  }
+
+  for (let sec = 0; sec < N; sec++) {
+    const pts = bySector.get(sec);
+    if (!pts || pts.length === 0) continue;
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0].x, pts[0].y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = sectorColor(sec, N);
+      ctx.fill();
+      ctx.strokeStyle = sectorStroke(sec, N);
+      ctx.stroke();
+      continue;
+    }
+    const hull = convexHull(pts);
+    if (hull.length < 3) {
+      ctx.beginPath();
+      ctx.moveTo(hull[0].x, hull[0].y);
+      ctx.lineTo(hull[hull.length - 1].x, hull[hull.length - 1].y);
+      ctx.strokeStyle = sectorStroke(sec, N);
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      continue;
+    }
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+    ctx.fillStyle = sectorColor(sec, N);
+    ctx.fill();
+    ctx.strokeStyle = sectorStroke(sec, N);
+    ctx.stroke();
+  }
+
+  const starById = new Map(data.stars.map(s => [s.id, s]));
+  ctx.strokeStyle = "rgba(140,200,255,0.55)";
+  ctx.lineWidth = 1;
+  for (const e of data.edges) {
+    const a = starById.get(e.a), b = starById.get(e.b);
+    if (!a || !b) continue;
+    ctx.beginPath();
+    ctx.moveTo(a.x * S, a.y * S);
+    ctx.lineTo(b.x * S, b.y * S);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#fff";
+  for (const st of data.stars) {
+	ctx.beginPath();
+	ctx.arc(st.x * S, st.y * S, 2, 0, Math.PI * 2);
+	ctx.fill();
+  }
+
+  // подсветка выбранной звезды (один раз, после цикла)
+  if (mapSelectedStar >= 0) {
+	const sel = data.stars.find(s => s.id === mapSelectedStar);
+	if (sel) {
+	  ctx.beginPath();
+	  ctx.arc(sel.x * S, sel.y * S, 7, 0, Math.PI * 2);
+	  ctx.strokeStyle = "#8cf";
+	  ctx.lineWidth = 1.5;
+	  ctx.stroke();
+	  ctx.lineWidth = 1;
+	}
+  }
+}
+
+function clearSector() {
+  const canvas = document.getElementById("sector");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function getBezierLengthJS(ax, ay, cx, cy, bx, by) {
+    let length = 0;
+    let prevX = ax, prevY = ay;
+    const segments = 20;
+    for (let i = 1; i <= segments; i++) {
+        const t = i / segments;
+        const mt = 1 - t;
+        const x = mt*mt*ax + 2*mt*t*cx + t*t*bx;
+        const y = mt*mt*ay + 2*mt*t*cy + t*t*by;
+        length += Math.hypot(x - prevX, y - prevY);
+        prevX = x;
+        prevY = y;
+    }
+    return length;
+}
+
+function getPlanetPosJS(p, day, starId) {
+  const r = p.orbit;
+  const baseAng = p.id * 137.508 * Math.PI / 180 + starId * 37.0 * Math.PI / 180;
+  const speed = ORBIT_K / p.orbit;
+  const ang = baseAng + speed * day;
+  return { x: r * Math.cos(ang), y: r * Math.sin(ang) };
+}
+
+function drawSector(sys, selectedID, day) {
+  const canvas = document.getElementById("sector");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, W, H);
+
+  if (!sys || !sys.planets || sys.planets.length === 0) return;
+
+  const cx = W / 2, cy = H / 2;
+  const margin = 20;
+  const R_out = Math.min(W, H) / 2 - margin;
+
+  let maxOrbit = 0;
+  for (const p of sys.planets) if (p.orbit > maxOrbit) maxOrbit = p.orbit;
+  if (maxOrbit <= 0) maxOrbit = 1;
+
+  // Сохраняем для обработчика клика
+  lastDrawCX = cx;
+  lastDrawCY = cy;
+  lastDrawScale = R_out / maxOrbit;
+
+  // Орбиты
+  ctx.lineWidth = 2;
+  for (const p of sys.planets) {
+    const r = R_out * (p.orbit / maxOrbit);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = p.habitable ? "rgba(90,150,230,0.55)" : "rgba(120,120,120,0.45)";
+    ctx.stroke();
+  }
+
+  // Планеты-точки
+  const N = sys.planets.length;
+  for (let j = 0; j < N; j++) {
+    const p = sys.planets[j];
+    const r = R_out * (p.orbit / maxOrbit);
+    const baseAng = (p.id * 137.508) * Math.PI / 180 + (sys.starId * 37.0) * Math.PI / 180;
+    const speed = ORBIT_K / p.orbit;
+    const ang = baseAng + speed * day;
+    const x = cx + r * Math.cos(ang);
+    const y = cy + r * Math.sin(ang);
+
+    let color = "#808080";
+    if (p.habitable && p.race >= 0 && p.race < PLANET_COLORS.length) color = PLANET_COLORS[p.race];
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    if (p.id === selectedID) {
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // --- Предпросмотр Безье ---
+  if (previewTargetID !== null && selectedID !== -1) {
+    const pA = sys.planets.find(p => p.id === selectedID);
+    const pB = sys.planets.find(p => p.id === previewTargetID);
+    if (pA && pB) {
+      const posA = getPlanetPosJS(pA, day, sys.starId);
+      const posB = getPlanetPosJS(pB, day, sys.starId);
+      
+      const midX = (posA.x + posB.x) / 2;
+      const midY = (posA.y + posB.y) / 2;
+      const dx = posB.x - posA.x;
+      const dy = posB.y - posA.y;
+      const lenAB = Math.hypot(dx, dy);
+      
+      if (lenAB > 0.01) {
+        let nx = -dy / lenAB;
+        let ny = dx / lenAB;
+        if (midX * nx + midY * ny < 0) { nx = -nx; ny = -ny; }
+        
+        const RSafe = 0.3;
+        const offset = RSafe + lenAB * 0.25;
+        const cx_ctrl = midX + nx * offset;
+        const cy_ctrl = midY + ny * offset;
+
+        ctx.beginPath();
+        ctx.strokeStyle = "#8cf";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        
+        for (let i = 0; i <= 20; i++) {
+          const t = i / 20;
+          const mt = 1 - t;
+          const px = mt*mt*posA.x + 2*mt*t*cx_ctrl + t*t*posB.x;
+          const py = mt*mt*posA.y + 2*mt*t*cy_ctrl + t*t*posB.y;
+          
+          const sx = cx + px * lastDrawScale;
+          const sy = cy + py * lastDrawScale;
+          
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // --- Вывод дистанции ---
+        const dist = getBezierLengthJS(posA.x, posA.y, cx_ctrl, cy_ctrl, posB.x, posB.y);
+        ctx.fillStyle = "#8cf";
+        ctx.font = "14px monospace";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "top";
+        ctx.fillText(`dist=${(dist * 1000).toFixed(0)}`, W - 8, 8);
+        ctx.fillText("target=" + previewTargetID, W - 8, 22);		
+      }
+    }
+  }
+  
+  // Звезда
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = "#c9a227";
+  ctx.fill();
+
+  // Подпись
+  ctx.fillStyle = "#888";
+  ctx.font = "12px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("star=" + sys.starId + " sector=" + sys.sector + " day=" + day, 8, 8);
+  ctx.fillText("planet=" + selectedID, 8, 22);  
+}
+
+// Обработчик клика по сектору
+document.getElementById("sector").addEventListener("click", (e) => {
+  if (!sectorSys) return;
+  
+  const rect = e.target.getBoundingClientRect();
+  const clickX = e.clientX - rect.left;
+  const clickY = e.clientY - rect.top;
+
+  // Мировые координаты
+  const wx = (clickX - lastDrawCX) / lastDrawScale;
+  const wy = (clickY - lastDrawCY) / lastDrawScale;
+
+  let clicked = null;
+  for (const p of sectorSys.planets) {
+    if (!p.habitable) continue;
+    if (p.id === sectorSelected) continue;
+    
+    const pos = getPlanetPosJS(p, worldDay, sectorSys.starId);
+    const d = Math.hypot(pos.x - wx, pos.y - wy);
+    if (d < 0.5) {
+      clicked = p;
+      break;
+    }
+  }
+
+  if (clicked) {
+    if (previewTargetID === clicked.id) {
+      previewTargetID = null; // повторный клик — только сброс превью
+    } else {
+      previewTargetID = clicked.id;
+      // перекидка: активная → таблица 1, кликнутая → таблица 2
+      const cur = planets[active];
+      planets[0] = cur;
+      planets[1] = clicked.id;
+      active = 0;
+      updateActiveFromCache();
+      renderTablesSoon();
+    }
+    drawSector(sectorSys, sectorSelected, worldDay);
+  } else {
+    previewTargetID = null;
+    drawSector(sectorSys, sectorSelected, worldDay);
+  }
+});
+
+document.getElementById("map").addEventListener("click", (e) => {
+  const canvas = e.target;
+  const rect = canvas.getBoundingClientRect();
+  const clickX = e.clientX - rect.left;
+  const clickY = e.clientY - rect.top;
+
+  const S = 2;
+  let clicked = null;
+  let bestD = 8;
+  for (const st of mapStarsCache) {
+    const d = Math.hypot(st.x * S - clickX, st.y * S - clickY);
+    if (d < bestD) { bestD = d; clicked = st; }
+  }
+
+  if (!clicked) {
+    mapSelectedStar = -1;
+    drawMap();
+    return;
+  }
+
+  mapSelectedStar = clicked.id;
+
+  loadSystem(clicked.id).then(sys => {
+    if (!sys || !sys.planets || sys.planets.length < 4) { drawMap(); return; }
+    const hp = sys.planets[3]; // четвёртая планета (j==3), всегда обитаема
+    if (!hp) { drawMap(); return; }
+
+    planets[0] = hp.id;
+    active = 0;
+
+    const pirate = sys.planets.find(p => p.isPirate);
+    if (pirate) planets[2] = pirate.id;
+
+    fetch("/planet/" + hp.id)
+      .then(r => r.ok ? r.json() : null)
+      .then(pj => {
+        if (pj) cache[hp.id] = pj;
+        updateActiveFromCache();
+        renderTablesSoon();
+        drawMap();
+      })
+      .catch(() => drawMap());
+  }).catch(() => drawMap());
+});
+
+async function updateSector() {
+  const id = planets[active];
+  const p = cache[id];
+  if (!p) { clearSector(); sectorSys = null; return; }
+  const sys = await loadSystem(p.star);
+  if (!sys) { clearSector(); sectorSys = null; return; }
+  sectorSys = sys;
+  sectorSelected = id;
+  drawSector(sectorSys, sectorSelected, worldDay);
+}
+
+setInterval(() => {
+  if (sectorSys) drawSector(sectorSys, sectorSelected, worldDay);
+}, 1000);
+
+(async () => {
+  await loadHabitable();
+  renderTables();
+  updateActiveFromCache();
+  pollWorld();
+  pollPlanets();
+  pollNews();
+  drawMap();
+})();
+</script>
+
+</body>
+</html>

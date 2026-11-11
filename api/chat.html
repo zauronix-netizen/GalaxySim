@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Galaxy Sim — чат</title>
+<style>
+  body { font-family: monospace; background: #1e1e1e; color: #ddd; margin: 0; padding: 8px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+  .tabs button { background: #333; color: #ddd; border: 1px solid #555; padding: 3px 10px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  .tabs button.active { background: #8cf; color: #111; border-color: #8cf; }
+  .tabs button:disabled { opacity: 0.35; cursor: default; }
+  .ctx { color: #888; font-size: 11px; margin-bottom: 6px; }
+  #log { flex: 1; overflow-y: auto; border: 1px solid #444; background: #151515; padding: 6px; font-size: 13px; }
+  #log div { padding: 1px 0; border-bottom: 1px solid #222; }
+  #log .nick { color: #8cf; }
+  #log .sys  { color: #888; font-style: italic; }
+  .row { display: flex; gap: 4px; margin-top: 6px; }
+  .row input.nick { width: 100px; }
+  .row input.text { flex: 1; }
+  input { background: #333; color: #ddd; border: 1px solid #555; padding: 4px; font-family: monospace; font-size: 13px; }
+  button.send { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 12px; cursor: pointer; font-family: monospace; }
+  button.send:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<div class="tabs" id="tabs">
+  <button data-room="world" class="active">Мир</button>
+  <button data-room="sector">Сектор</button>
+  <button data-room="system">Система</button>
+  <button data-room="planet">Планета</button>
+</div>
+
+<div class="ctx" id="ctx">—</div>
+
+<div id="log"></div>
+
+<div class="row">
+  <input class="nick" id="nick" placeholder="ник" maxlength="20">
+  <input class="text" id="text" placeholder="сообщение…" maxlength="200">
+  <button class="send" id="send">send</button>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const planetID = parseInt(params.get("planet") || "0", 10);
+
+let planet = null;   // {id, star, sector}
+let roomKeys = {};   // "world"/"sector"/"system"/"planet" → "world" / "sector:5" / "system:42" / "planet:1001"
+let activeTab = "world";
+let lastID = 0;
+let pollTimer = null;
+
+const logEl = document.getElementById("log");
+const nickEl = document.getElementById("nick");
+const textEl = document.getElementById("text");
+const ctxEl = document.getElementById("ctx");
+
+// --- ник: localStorage ---
+nickEl.value = localStorage.getItem("gs_chat_nick") || "";
+nickEl.addEventListener("change", () => {
+  localStorage.setItem("gs_chat_nick", nickEl.value.trim());
+});
+
+// --- контекст из ?planet= ---
+async function loadPlanet() {
+  if (!planetID) return;
+  try {
+    const r = await fetch("/planet/" + planetID);
+    if (!r.ok) return;
+    const p = await r.json();
+    planet = { id: p.id, star: p.star, sector: p.sector };
+  } catch (e) { console.error(e); }
+}
+
+function buildRoomKeys() {
+  roomKeys = { world: "world" };
+  if (planet) {
+    roomKeys.sector = "sector:" + planet.sector;
+    roomKeys.system = "system:" + planet.star;
+    roomKeys.planet = "planet:" + planet.id;
+  }
+}
+
+// --- табы ---
+const tabsEl = document.getElementById("tabs");
+tabsEl.querySelectorAll("button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const room = btn.dataset.room;
+    if (!roomKeys[room]) return; // disabled
+    activeTab = room;
+    tabsEl.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+    switchRoom();
+  });
+});
+
+function updateTabsState() {
+  tabsEl.querySelectorAll("button").forEach(btn => {
+    const room = btn.dataset.room;
+    btn.disabled = !roomKeys[room];
+  });
+}
+
+// --- лента ---
+function clearLog() {
+  logEl.innerHTML = "";
+}
+
+function appendMessage(m) {
+  const div = document.createElement("div");
+  const nick = document.createElement("span");
+  nick.className = "nick";
+  nick.textContent = m.nick + ": ";
+  const text = document.createElement("span");
+  text.textContent = m.text;
+  div.appendChild(nick);
+  div.appendChild(text);
+  logEl.appendChild(div);
+}
+
+function appendSystem(text) {
+  const div = document.createElement("div");
+  div.className = "sys";
+  div.textContent = "— " + text + " —";
+  logEl.appendChild(div);
+}
+
+// --- polling ---
+async function poll() {
+  const room = roomKeys[activeTab];
+  if (!room) return;
+  try {
+    const r = await fetch(`/chat/messages?room=${encodeURIComponent(room)}&since=${lastID}`);
+    if (!r.ok) return;
+    const arr = await r.json();
+    if (Array.isArray(arr) && arr.length > 0) {
+      for (const m of arr) {
+        appendMessage(m);
+        if (m.id > lastID) lastID = m.id;
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  } catch (e) { console.error(e); }
+  pollTimer = setTimeout(poll, 2000);
+}
+
+function switchRoom() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  lastID = 0;
+  clearLog();
+  updateCtx();
+  appendSystem("комната: " + roomKeys[activeTab]);
+  poll();
+}
+
+function updateCtx() {
+  if (planet) {
+    ctxEl.textContent = `planet=${planet.id} star=${planet.star} sector=${planet.sector}`;
+  } else {
+    ctxEl.textContent = "контекст планеты не задан (?planet=ID) — только мир";
+  }
+}
+
+// --- отправка ---
+async function send() {
+  const room = roomKeys[activeTab];
+  if (!room) return;
+  const text = textEl.value.trim();
+  if (!text) return;
+  const nick = (nickEl.value.trim() || "anon").slice(0, 20);
+  try {
+    const r = await fetch("/chat/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room, nick, text }),
+    });
+    if (!r.ok) {
+      appendSystem("ошибка отправки: " + r.status);
+      return;
+    }
+    textEl.value = "";
+    // не ждём polling — сразу подтянем
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    poll();
+  } catch (e) {
+    appendSystem("ошибка сети");
+    console.error(e);
+  }
+}
+
+document.getElementById("send").addEventListener("click", send);
+textEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); send(); }
+});
+
+// --- старт ---
+(async () => {
+  await loadPlanet();
+  buildRoomKeys();
+  updateTabsState();
+  switchRoom();
+})();
+</script>
+
+</body>
+</html>
