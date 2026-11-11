@@ -1,0 +1,27 @@
+# Бинарники
+*.exe
+galaxysim
+lairs
+viewer
+chat
+
+# Архивы и ярлыки
+*.7z
+*.zip
+*.lnk
+
+# Логи
+*.log
+traders.log
+tree.log
+
+# Временное / служебное
+temp.txt
+lairs.txt
+*.bak
+*_bak
+*.tmp
+
+# Бэкапы редактора
+*~
+*.swp
