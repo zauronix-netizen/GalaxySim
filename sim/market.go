@@ -45,7 +45,10 @@ func (w *World) UpdateMarketState(p *Planet, g Good) {
 	ri := &PlanetRaceMarket[p.Race]
 	gi := &PlanetGovernmentMarket[p.Government]
 
-	ecoFactor := gm.EconomyFactors[p.Economy]
+	// ecoFactor — от экономики планеты (0..8), не от товара.
+	// 0 = Agri-Poor ... 8 = Ind-Rich. Rich дешевле, Poor дороже.
+	// Нормализуем: база 1.0, шаг ±0.1 на градацию, ±0.05 на тип.
+	ecoFactor := economyPriceFactor(p.Economy)
 	if p.OwnerId == oiPirate {
 		ecoFactor *= gm.PirateEconomyFactor
 	}
@@ -69,10 +72,15 @@ func (w *World) UpdateMarketState(p *Planet, g Good) {
 	}
 	m.TargetStock = int(targetStock)
 
-	targetPrice := float64(gm.AveragePrice) *
-		ri.Goods.PriceFactor[g] *
-		gi.Goods.PriceFactor[g] /
-		ecoFactor
+	// Цена: базовая + поправка от экономики планеты (Elite-стиль, упрощённо).
+	// EcoAdjustPrice >0 — дороже в богатых, <0 — дешевле в богатых.
+	// Economy 0..8: Poor (0,3,6) — дороже, Rich (2,5,8) — дешевле.
+	ecoAdj := gm.EcoAdjustPrice * economyRichness(p.Economy)
+	targetPrice := float64(gm.AveragePrice) + ecoAdj
+	if targetPrice < 1 {
+		targetPrice = 1
+	}
+	targetPrice *= ri.Goods.PriceFactor[g] * gi.Goods.PriceFactor[g] / ecoFactor
 
 	count := float64(m.Count)
 	ts := float64(m.TargetStock)
@@ -193,4 +201,32 @@ func (w *World) ComputeGlobalGoodsPriceBands() {
 		gm.MinPrice = int(minP)
 		gm.MaxPrice = int(maxP)
 	}
+}
+
+// economyPriceFactor — множитель цены от экономики планеты.
+// Rich дешевле (0.85..0.95), Poor дороже (1.05..1.15), Avg = 1.0.
+func economyPriceFactor(e Economy) float64 {
+	switch e {
+	case EcoAgriPoor, EcoMixedPoor, EcoIndPoor:
+		return 1.10
+	case EcoAgriAvg, EcoMixedAvg, EcoIndAvg:
+		return 1.00
+	case EcoAgriRich, EcoMixedRich, EcoIndRich:
+		return 0.90
+	}
+	return 1.0
+}
+
+// economyRichness — поправка к EcoAdjustPrice: Rich усиливает (1.0),
+// Poor ослабляет (0.5). Avg — 0.75.
+func economyRichness(e Economy) float64 {
+	switch e {
+	case EcoAgriRich, EcoMixedRich, EcoIndRich:
+		return 1.0
+	case EcoAgriAvg, EcoMixedAvg, EcoIndAvg:
+		return 0.75
+	case EcoAgriPoor, EcoMixedPoor, EcoIndPoor:
+		return 0.5
+	}
+	return 0.75
 }

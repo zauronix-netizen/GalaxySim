@@ -23,7 +23,9 @@ type Server struct {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/sector/", s.handleSector)
 	mux.HandleFunc("/planet/", s.handlePlanet)
+	mux.HandleFunc("/player/", s.handlePlayer)
 	mux.HandleFunc("/map", s.handleMap)
 	mux.HandleFunc("/world", s.handleWorld)
 	mux.HandleFunc("/habitable", s.handleHabitable)
@@ -37,6 +39,22 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/", s.handleIndex)
 }
 
+type SectorMarketJSON struct {
+	Good  int     `json:"good"`
+	Buy   float64 `json:"buy"`
+	Sell  float64 `json:"sell"`
+	Count int     `json:"count"`
+}
+
+type SectorJSON struct {
+	Sector      int                `json:"sector"`
+	Stars       int                `json:"stars"`
+	Planets     int                `json:"planets"`
+	Uninhabited int                `json:"uninhabited"`
+	Lairs       int                `json:"lairs"`
+	Market      []SectorMarketJSON `json:"market"`
+}
+
 type LairJSON struct {
 	ID        int     `json:"id"`
 	StarID    int     `json:"starId"`
@@ -45,6 +63,85 @@ type LairJSON struct {
 	Money     float64 `json:"money"`
 	TechLevel int     `json:"techLevel"`
 	Cargo     []int   `json:"cargo"` // порядок GoodsTextOrder
+}
+
+func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/player/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 0 || id >= sim.SectorCount {
+		http.Error(w, "bad sector id", http.StatusBadRequest)
+		return
+	}
+	market := s.World.PlayerMarket(id)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(market)
+}
+
+func (s *Server) handleSector(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/sector/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 0 || id >= sim.SectorCount {
+		http.Error(w, "bad sector id", http.StatusBadRequest)
+		return
+	}
+
+	out := SectorJSON{
+		Sector: id,
+		Market: make([]SectorMarketJSON, 0, len(sim.GoodsTextOrder)),
+	}
+
+	// Сводка: звёзды, планеты, необитаемые, логова.
+	type acc struct {
+		sumBuy   float64
+		sumSell  float64
+		sumCount int
+		n        int
+	}
+	var mkt [sim.GoodCount]acc
+
+	for _, st := range s.World.Stars {
+		if st.Sector != id {
+			continue
+		}
+		out.Stars++
+		for _, p := range s.World.PlanetMap[st.ID] {
+			out.Planets++
+			if !p.Habitable {
+				out.Uninhabited++
+			}
+			if p.IsPirateLair() {
+				out.Lairs++
+			}
+			if !p.Habitable || p.IsPirateLair() {
+				continue // в рынок не входят
+			}
+			for g := 0; g < int(sim.GoodCount); g++ {
+				m := &p.Market[g]
+				mkt[g].sumBuy += m.PurchasePrice
+				mkt[g].sumSell += m.BaseSalePrice
+				mkt[g].sumCount += m.Count
+				mkt[g].n++
+			}
+		}
+	}
+
+	for _, idx := range sim.GoodsTextOrder {
+		a := mkt[idx]
+		buy, sell := 0.0, 0.0
+		if a.n > 0 {
+			buy = a.sumBuy / float64(a.n)
+			sell = a.sumSell / float64(a.n)
+		}
+		out.Market = append(out.Market, SectorMarketJSON{
+			Good:  idx,
+			Buy:   buy,
+			Sell:  sell,
+			Count: a.sumCount,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleLair(w http.ResponseWriter, r *http.Request) {
@@ -237,28 +334,54 @@ func raceName(r sim.Race) string {
 
 func economyShort(e sim.Economy) string {
 	switch e {
-	case sim.EcoAgri:
-		return "agri"
-	case sim.EcoMixed:
-		return "mixed"
-	case sim.EcoInd:
-		return "ind"
+	case sim.EcoAgriPoor:
+		return "Agr-p"
+	case sim.EcoAgriAvg:
+		return "Agr-a"
+	case sim.EcoAgriRich:
+		return "Agr-r"
+	case sim.EcoMixedPoor:
+		return "Mix-p"
+	case sim.EcoMixedAvg:
+		return "Mix-a"
+	case sim.EcoMixedRich:
+		return "Mix-r"
+	case sim.EcoIndPoor:
+		return "Ind-p"
+	case sim.EcoIndAvg:
+		return "Ind-a"
+	case sim.EcoIndRich:
+		return "Ind-r"
 	}
 	return "?"
+}
+
+func economyName(e sim.Economy) string {
+	return economyShort(e)
 }
 
 func governmentShort(g sim.Government) string {
 	switch g {
 	case sim.GovAnarchy:
 		return "anar"
+	case sim.GovFeudal:
+		return "feud"
+	case sim.GovMultiGovernment:
+		return "multi"
 	case sim.GovDictatorship:
 		return "dict"
+	case sim.GovCommunist:
+		return "com"
+	case sim.GovConfederacy:
+		return "conf"
+	case sim.GovDemocracy:
+		return "dem"
+	case sim.GovCorporateState:
+		return "corp"
 	case sim.GovMonarchy:
 		return "mon"
 	case sim.GovRepublic:
 		return "rep"
-	case sim.GovDemocracy:
-		return "dem"
 	}
 	return "?"
 }
@@ -267,28 +390,26 @@ func governmentName(g sim.Government) string {
 	switch g {
 	case sim.GovAnarchy:
 		return "anarchy"
+	case sim.GovFeudal:
+		return "feudal"
+	case sim.GovMultiGovernment:
+		return "multi-government"
 	case sim.GovDictatorship:
 		return "dictatorship"
+	case sim.GovCommunist:
+		return "communist"
+	case sim.GovConfederacy:
+		return "confederacy"
+	case sim.GovDemocracy:
+		return "democracy"
+	case sim.GovCorporateState:
+		return "corporate state"
 	case sim.GovMonarchy:
 		return "monarchy"
 	case sim.GovRepublic:
 		return "republic"
-	case sim.GovDemocracy:
-		return "democracy"
 	}
 	return "?"
-}
-
-func economyName(e sim.Economy) string {
-	switch e {
-	case sim.EcoAgri:
-		return "agricultural"
-	case sim.EcoMixed:
-		return "mixed"
-	case sim.EcoInd:
-		return "industrial"
-	}
-	return "unknown"
 }
 
 func (s *Server) handlePlanet(w http.ResponseWriter, r *http.Request) {

@@ -65,11 +65,72 @@
   <canvas id="sector" width="460" height="460" style="border:1px solid #444; background:#111;"></canvas>
 </div>
 
+<div id="sectorSummary" class="stat" style="margin-top:8px;">—</div>
+<div id="sectorMarketWrap" style="margin-top:8px; display:none; gap:16px; align-items:flex-start;">
+  <div>
+    <div class="ptype" style="color:#8cf; margin-bottom:4px;">sector market (38)</div>
+    <table>
+      <thead><tr>
+        <th>good</th><th>buy</th><th>sell</th><th>count</th>
+      </tr></thead>
+      <tbody id="sectorMarketBody"></tbody>
+    </table>
+  </div>
+  <div>
+    <div class="ptype" style="color:#8cf; margin-bottom:4px;">player market (8)</div>
+    <table>
+      <thead><tr>
+        <th>good</th><th>buy</th><th>sell</th><th>count</th>
+      </tr></thead>
+      <tbody id="playerMarketBody"></tbody>
+    </table>
+  </div>
+</div>
+
 <h3>Новости (общие)</h3>
 <div id="news"></div>
 
 <script>
-const GOOD_NAMES = ["food","medicine","technics","luxury","minerals","alcohol","arms","narcotics"];
+const GOOD_NAMES = [
+  "food",            // 0
+  "textiles",        // 1
+  "radioactives",    // 2
+  "slaves",          // 3
+  "liquor/wines",    // 4
+  "luxuries",        // 5
+  "narcotics",       // 6
+  "computers",       // 7
+  "machinery",       // 8
+  "alloys",          // 9
+  "firearms",        // 10  (firearms → weapons)
+  "furs",            // 11
+  "minerals",        // 12
+  "gold",            // 13
+  "platinum",        // 14
+  "gem-stones",      // 15
+  "alien items",     // 16
+  "ferr metal",      // 17  (ferrous metals)
+  "timber",          // 18
+  "air proc",        // 19  (air processors)
+  "animal meat",     // 20
+  "animal skins",    // 21
+  "weapons",         // 22  (battle weapons) — или "weapons"? см. ниже
+  "mechanices",      // 23  (farm machinery)
+  "fertilizer",      // 24
+  "grain",           // 25
+  "drone",           // 26
+  "polimers",        // 27  (heavy plastics)
+  "hydrogen",        // 28  (hydrogen fuel)
+  "industrial",      // 29  (industrial parts)
+  "oxygen",          // 30  (liquid oxygen)
+  "live animals",    // 31
+  "medicines",       // 32
+  "battletech",      // 33  (military fuel)
+  "nerve gas",       // 34
+  "robots",          // 35
+  "synth meat",      // 36  (synthetic meat)
+  "water"            // 37
+];
 
 let running = true;
 let habitable = [];
@@ -686,12 +747,113 @@ setInterval(() => {
   if (sectorSys) drawSector(sectorSys, sectorSelected, worldDay);
 }, 1000);
 
+let sectorSummaryData = null;
+let sectorMarketData = null;
+
+async function pollSectorSummary() {
+  try {
+    const id = planets[active];
+    const p = cache[id];
+    if (!p) {
+      document.getElementById("sectorSummary").textContent = "—";
+      setTimeout(pollSectorSummary, 1000);
+      return;
+    }
+    const r = await fetch("/sector/" + p.sector);
+    if (r.ok) {
+      const s = await r.json();
+      document.getElementById("sectorSummary").textContent =
+        `sector=${s.sector}  stars=${s.stars}  planets=${s.planets}  uninhabited=${s.uninhabited}  lairs=${s.lairs}`;
+    }
+  } catch (e) { console.error(e); }
+  setTimeout(pollSectorSummary, 1000);
+}
+
+const PLAYER_GOOD_NAMES = ["food","medicine","technics","luxury","minerals","alcohol","arms","narcotics"];
+
+async function pollPlayerMarket() {
+  try {
+    const wrap = document.getElementById("sectorMarketWrap");
+    if (mapSelectedStar < 0) {
+      wrap.style.display = "none";
+      setTimeout(pollPlayerMarket, 1000);
+      return;
+    }
+    const st = mapStarsCache.find(s => s.id === mapSelectedStar);
+    if (!st) {
+      wrap.style.display = "none";
+      setTimeout(pollPlayerMarket, 1000);
+      return;
+    }
+    const r = await fetch("/player/" + st.sector);
+    if (r.ok) {
+      const arr = await r.json();
+      wrap.style.display = "flex";
+      renderPlayerMarket(arr);
+    }
+  } catch (e) { console.error(e); }
+  setTimeout(pollPlayerMarket, 1000);
+}
+
+function renderPlayerMarket(arr) {
+  const tb = document.getElementById("playerMarketBody");
+  tb.innerHTML = "";
+  for (const m of arr) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${PLAYER_GOOD_NAMES[m.good]}</td>
+      <td>${m.buy.toFixed(1)}</td>
+      <td>${m.sell.toFixed(1)}</td>
+      <td>${m.count}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function pollSectorMarket() {
+  try {
+    const wrap = document.getElementById("sectorMarketWrap");
+    if (mapSelectedStar < 0) {
+      wrap.style.display = "none";
+      setTimeout(pollSectorMarket, 1000);
+      return;
+    }
+    const st = mapStarsCache.find(s => s.id === mapSelectedStar);
+    if (!st) {
+      wrap.style.display = "none";
+      setTimeout(pollSectorMarket, 1000);
+      return;
+    }
+    const r = await fetch("/sector/" + st.sector);
+    if (r.ok) {
+      const s = await r.json();
+      wrap.style.display = "flex";
+      renderSectorMarket(s);
+    }
+  } catch (e) { console.error(e); }
+  setTimeout(pollSectorMarket, 1000);
+}
+
+function renderSectorMarket(s) {
+  const tb = document.getElementById("sectorMarketBody");
+  tb.innerHTML = "";
+  for (const m of s.market) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${GOOD_NAMES[m.good]}</td>
+      <td>${m.buy.toFixed(1)}</td>
+      <td>${m.sell.toFixed(1)}</td>
+      <td>${m.count}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
 (async () => {
   await loadHabitable();
   renderTables();
   updateActiveFromCache();
   pollWorld();
   pollPlanets();
+  pollSectorSummary();
+  pollSectorMarket();
+  pollPlayerMarket();
   pollNews();
   drawMap();
 })();

@@ -34,26 +34,6 @@ const (
 	RaceCount
 )
 
-type Government int
-
-const (
-	GovAnarchy Government = iota
-	GovDictatorship
-	GovMonarchy
-	GovRepublic
-	GovDemocracy
-	GovCount
-)
-
-type Economy int
-
-const (
-	EcoAgri Economy = iota
-	EcoMixed
-	EcoInd
-	EcoCount
-)
-
 type OwnerId int
 
 const (
@@ -71,15 +51,76 @@ const (
 type Good int
 
 const (
-	GoodFood Good = iota
-	GoodMedicine
-	GoodTechnics
-	GoodLuxury
-	GoodMinerals
-	GoodAlcohol
-	GoodArms
-	GoodNarcotics
+	GoodFood           Good = iota // 0
+	GoodTextiles                   // 1
+	GoodRadioactives               // 2
+	GoodSlaves                     // 3
+	GoodLiquorWines                // 4
+	GoodLuxuries                   // 5
+	GoodNarcotics                  // 6
+	GoodComputers                  // 7
+	GoodMachinery                  // 8
+	GoodAlloys                     // 9
+	GoodFirearms                   // 10
+	GoodFurs                       // 11
+	GoodMinerals                   // 12
+	GoodGold                       // 13
+	GoodPlatinum                   // 14
+	GoodGemStones                  // 15
+	GoodAlienItems                 // 16
+	GoodFerrousMetals              // 17
+	GoodTimber                     // 18
+	GoodAirProcessors              // 19
+	GoodAnimalMeat                 // 20
+	GoodAnimalSkins                // 21
+	GoodBattleWeapons              // 22
+	GoodFarmMachinery              // 23
+	GoodFertilizer                 // 24
+	GoodGrain                      // 25
+	GoodDrone                      // 26
+	GoodHeavyPlastics              // 27
+	GoodHydrogenFuel               // 28
+	GoodIndustrialParts            // 29
+	GoodLiquidOxygen               // 30
+	GoodLiveAnimals                // 31
+	GoodMedicines                  // 32
+	GoodMilitaryFuel               // 33
+	GoodNerveGas                   // 34
+	GoodRobots                     // 35
+	GoodSyntheticMeat              // 36
+	GoodWater                      // 37
 	GoodCount
+)
+
+type Economy int
+
+const (
+	EcoAgriPoor Economy = iota // 0
+	EcoAgriAvg                 // 1
+	EcoAgriRich                // 2
+	EcoMixedPoor               // 3
+	EcoMixedAvg                // 4
+	EcoMixedRich               // 5
+	EcoIndPoor                 // 6
+	EcoIndAvg                  // 7
+	EcoIndRich                 // 8
+	EcoCount
+)
+
+type Government int
+
+const (
+	GovAnarchy Government = iota // 0
+	GovFeudal                    // 1
+	GovMultiGovernment           // 2
+	GovDictatorship              // 3
+	GovCommunist                 // 4
+	GovConfederacy               // 5
+	GovDemocracy                 // 6
+	GovCorporateState            // 7
+	GovMonarchy                  // 8
+	GovRepublic                  // 9
+	GovCount
 )
 
 type MarketEntry struct {
@@ -291,7 +332,7 @@ func NewWorld(seed int64) *World {
 				p.Race = Race(rng.Intn(int(RaceCount))) // случайная раса (пригодится позже)
 				p.OwnerId = oiUninhabited
 				p.Pop = 0
-				p.Economy = EcoMixed
+				p.Economy = EcoMixedAvg
 				// Логово пирата: необитаемая на дальнем краю (j=4..6, orbit 4.2..5.8).
 				if p.Orbit >= 4.2 && p.Orbit <= 5.8 {
 					p.OwnerId = oiPirate
@@ -417,7 +458,7 @@ func (w *World) IsLegal(p *Planet, g Good) bool {
 	if !GoodsLegalOnPlanet[g][p.Race][p.Government] {
 		return false
 	}
-	if (g == GoodFood || g == GoodMedicine) && w.HealthEffectNewMolizone {
+	if (g == GoodFood || g == GoodMedicines) && w.HealthEffectNewMolizone {
 		return false
 	}
 	return true
