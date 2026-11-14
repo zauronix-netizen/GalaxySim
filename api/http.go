@@ -445,7 +445,7 @@ func (s *Server) handleStation(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]StationGoodJSON, 0, sim.PlayerGoodCount)
 	for pg := 0; pg < int(sim.PlayerGoodCount); pg++ {
-		buy, sell := sim.StationPrice(sim.PlayerGood(pg), pm[pg].Count)
+		buy, sell := s.World.StationPrice(sim.PlayerGood(pg), pm[pg].Count)
 		out = append(out, StationGoodJSON{
 			Good:    pg,
 			Buy:     buy,

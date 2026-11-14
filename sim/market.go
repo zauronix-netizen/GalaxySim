@@ -66,11 +66,14 @@ func (w *World) UpdateMarketState(p *Planet, g Good) {
 		gi.Goods.StockFactor[g] *
 		ecoFactor *
 		radiusRemap *
-		popFactor)
+		popFactor *
+		float64(p.TechLevel))   // <-- TL
+	
 	if targetStock < 1 {
 		targetStock = 1
 	}
-	m.TargetStock = int(targetStock)
+	
+	m.TargetStock = int(targetStock) * p.TechLevel
 
 	// Цена: базовая + поправка от экономики планеты (Elite-стиль, упрощённо).
 	// EcoAdjustPrice >0 — дороже в богатых, <0 — дешевле в богатых.

@@ -32,25 +32,24 @@ var PlayerGoodNames = [PlayerGoodCount]string{
 // TODO: сюда же добавятся товары вне симуляции (спутники, необитаемые,
 // производство игроков), когда появятся — через отдельный диапазон/тип.
 var PlayerGoodMap = [PlayerGoodCount][]Good{
-	// food
-	{GoodFood, GoodGrain, GoodAnimalMeat, GoodSyntheticMeat, GoodLiveAnimals, GoodWater, GoodFertilizer},
-	// medicine
-	{GoodMedicines},
-	// technics
-	{GoodComputers, GoodMachinery, GoodRobots, GoodDrone, GoodIndustrialParts,
-		GoodFarmMachinery, GoodAirProcessors, GoodHeavyPlastics, GoodAlloys,
-		GoodHydrogenFuel, GoodLiquidOxygen},
-	// luxury
+	// food (6)
+	{GoodFood, GoodGrain, GoodAnimalMeat, GoodSyntheticMeat, GoodWater, GoodFertilizer},
+	// medicine (6)
+	{GoodMedicines, GoodWater, GoodAirProcessors, GoodTextiles, GoodLiquorWines, GoodNarcotics},
+	// technics (8)
+	{GoodComputers, GoodMachinery, GoodIndustrialParts, GoodFarmMachinery, GoodAirProcessors,
+		GoodHeavyPlastics, GoodHydrogenFuel, GoodLiquidOxygen},
+	// luxury (9)
 	{GoodLuxuries, GoodGemStones, GoodGold, GoodPlatinum, GoodAlienItems,
-		GoodTextiles, GoodFurs, GoodAnimalSkins},
-	// minerals
-	{GoodMinerals, GoodFerrousMetals, GoodTimber, GoodRadioactives},
-	// alcohol
-	{GoodLiquorWines},
-	// arms
-	{GoodFirearms, GoodBattleWeapons, GoodMilitaryFuel},
-	// narcotics
-	{GoodNarcotics, GoodNerveGas, GoodSlaves},
+		GoodTextiles, GoodFurs, GoodAnimalSkins, GoodLiveAnimals},
+	// minerals (6) — +Alloys уже есть, +Timber, +Radioactives, +FerrousMetals, +Minerals
+	{GoodMinerals, GoodFerrousMetals, GoodAlloys, GoodTimber, GoodRadioactives, GoodHeavyPlastics},
+	// alcohol (6) — +Luxuries, +Narcotics, +LiquorWines, +Furs?, +Water?, +LiveAnimals?
+	{GoodLiquorWines, GoodLuxuries, GoodNarcotics, GoodWater, GoodLiveAnimals, GoodFurs},
+	// arms (6) — +Robots, +Drone, +Machinery?, +Computers?
+	{GoodFirearms, GoodBattleWeapons, GoodMilitaryFuel, GoodRobots, GoodDrone, GoodComputers},
+	// narcotics (6) — +NerveGas, +Slaves, +Narcotics, +LiquorWines?, +Medicines?, +AlienItems?
+	{GoodNarcotics, GoodNerveGas, GoodSlaves, GoodLiquorWines, GoodMedicines, GoodAlienItems},
 }
 
 // PlayerMarketEntry — строка рынка игрока (одна из 8).
@@ -146,13 +145,19 @@ type Station struct {
 // StationPrice — упрощённая старая формула цены для станции.
 // count — из сима (PlayerMarket.count), ts — старый BaseStock (OldGoodsMarket).
 // Без рас/правительств, всё легально.
-func StationPrice(pg PlayerGood, count int) (buy, sell float64) {
+func (w *World) StationPrice(pg PlayerGood, count int) (buy, sell float64) {
 	gm := &OldGoodsMarket[pg]
 	ts := float64(gm.BaseStock)
 	if ts < 1 {
 		ts = 1
 	}
-	c := float64(count)
+
+	// Нормализация склада под старый BaseStock с учётом GTL.
+	// count (сим, 8) → «эффективный склад» в шкале старой модели.
+	c := float64(count) / (1000.0 * float64(w.GalaxyTechLevel))
+	if c < 1 {
+		c = 1
+	}
 
 	target := float64(gm.AveragePrice)
 	if c < ts {
@@ -170,4 +175,111 @@ func StationPrice(pg PlayerGood, count int) (buy, sell float64) {
 	buy = math.Max(2, math.Round(target))
 	sell = math.Max(buy/2+1, math.Round(target*0.5-1))
 	return buy, sell
+}
+
+// phaseStations — распределение Balance станции по планетам сектора.
+//   Balance > 0 (sell): заливаем дефицитные планеты (Count < TargetStock*2.5)
+//     до 2.5×, Balance уменьшаем на добавленное.
+//   Balance < 0 (buy): забираем с планет избыток (Count > TargetStock*0.25)
+//     до 0.25×, Balance уменьшаем (по модулю) на взятое.
+// Пока Balance не 0 и есть подходящие планеты. Остаток висит.
+// Вызывать каждый тик (делитель — позже).
+func (w *World) phaseStations() {
+	for _, st := range w.Stations {
+		if st == nil {
+			continue
+		}
+		for pg := 0; pg < int(PlayerGoodCount); pg++ {
+			bal := st.Balance[pg]
+			if bal == 0 {
+				continue
+			}
+
+			if bal > 0 {
+				// sell: заливаем до 2.5× TargetStock.
+				for _, g := range PlayerGoodMap[pg] {
+					if bal <= 0 {
+						break
+					}
+					for _, starID := range w.sectorStarIDs(st.Sector) {
+						if bal <= 0 {
+							break
+						}
+						for _, p := range w.PlanetMap[starID] {
+							if bal <= 0 {
+								break
+							}
+							if !p.Habitable || p.IsPirateLair() {
+								continue
+							}
+							m := &p.Market[g]
+							ts := m.TargetStock
+							if ts < 1 {
+								ts = 1
+							}
+							ceiling := int(float64(ts) * 2.5)
+							if m.Count >= ceiling {
+								continue
+							}
+							add := ceiling - m.Count
+							if add > bal {
+								add = bal
+							}
+							m.Count += add
+							bal -= add
+						}
+					}
+				}
+				st.Balance[pg] = bal
+			} else {
+				// buy: забираем до 0.25× TargetStock.
+				need := -bal
+				for _, g := range PlayerGoodMap[pg] {
+					if need <= 0 {
+						break
+					}
+					for _, starID := range w.sectorStarIDs(st.Sector) {
+						if need <= 0 {
+							break
+						}
+						for _, p := range w.PlanetMap[starID] {
+							if need <= 0 {
+								break
+							}
+							if !p.Habitable || p.IsPirateLair() {
+								continue
+							}
+							m := &p.Market[g]
+							ts := m.TargetStock
+							if ts < 1 {
+								ts = 1
+							}
+							floor := int(float64(ts) * 0.25)
+							if m.Count <= floor {
+								continue
+							}
+							take := m.Count - floor
+							if take > need {
+								take = need
+							}
+							m.Count -= take
+							need -= take
+						}
+					}
+				}
+				st.Balance[pg] = -need
+			}
+		}
+	}
+}
+
+// sectorStarIDs — звёзды сектора (кэш не нужен: 72×~8 звёзд, дёшево).
+func (w *World) sectorStarIDs(sector int) []int {
+	ids := make([]int, 0, 16)
+	for _, s := range w.Stars {
+		if s.Sector == sector {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
 }

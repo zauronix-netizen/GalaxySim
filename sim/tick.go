@@ -19,6 +19,7 @@ func (w *World) SimTick() {
 		w.phaseMovement()
 		w.phaseSpawn()
 		w.phaseEconomy()
+		w.phaseStations()   // <-- станции: Balance>0 → планеты
 		w.phaseTraders()
 		w.LogTickEvents()
 		w.phaseRelations()
@@ -827,7 +828,9 @@ func (w *World) phaseEconomy() {
 		w.checkGoodsCounters(p)
 		w.phasePopulation(p) // C2: динамика населения, первой
 		
-		w.applyProduction(p) // <-- производство/потребление
+		if w.Day%(36*4) == 0 {
+			w.applyProduction(p)
+		}
 		for g := 0; g < int(GoodCount); g++ {
 			w.UpdateMarketState(p, Good(g))
 		}
