@@ -26,6 +26,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/sector/", s.handleSector)
 	mux.HandleFunc("/planet/", s.handlePlanet)
 	mux.HandleFunc("/player/", s.handlePlayer)
+	mux.HandleFunc("/station/", s.handleStation)       // уже есть (GET)
+	mux.HandleFunc("/station/trade", s.handleStationTrade) // POST
 	mux.HandleFunc("/map", s.handleMap)
 	mux.HandleFunc("/world", s.handleWorld)
 	mux.HandleFunc("/habitable", s.handleHabitable)
@@ -44,6 +46,21 @@ type SectorMarketJSON struct {
 	Buy   float64 `json:"buy"`
 	Sell  float64 `json:"sell"`
 	Count int     `json:"count"`
+}
+
+type StationGoodJSON struct {
+	Good    int     `json:"good"`
+	Buy     float64 `json:"buy"`
+	Sell    float64 `json:"sell"`
+	Count   int     `json:"count"`
+	Balance int     `json:"balance"`
+}
+
+type stationTradeReq struct {
+	Sector int    `json:"sector"`
+	Good   int    `json:"good"`
+	Qty    int    `json:"qty"`
+	Op     string `json:"op"` // "buy" | "sell"
 }
 
 type SectorJSON struct {
@@ -410,6 +427,74 @@ func governmentName(g sim.Government) string {
 		return "republic"
 	}
 	return "?"
+}
+
+func (s *Server) handleStation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/station/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 0 || id >= sim.SectorCount {
+		http.Error(w, "bad sector id", http.StatusBadRequest)
+		return
+	}
+	if id >= len(s.World.Stations) || s.World.Stations[id] == nil {
+		http.Error(w, "station not found", http.StatusNotFound)
+		return
+	}
+	st := s.World.Stations[id]
+	pm := s.World.PlayerMarket(id)
+
+	out := make([]StationGoodJSON, 0, sim.PlayerGoodCount)
+	for pg := 0; pg < int(sim.PlayerGoodCount); pg++ {
+		buy, sell := sim.StationPrice(sim.PlayerGood(pg), pm[pg].Count)
+		out = append(out, StationGoodJSON{
+			Good:    pg,
+			Buy:     buy,
+			Sell:    sell,
+			Count:   pm[pg].Count,
+			Balance: st.Balance[pg],
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (s *Server) handleStationTrade(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	var req stationTradeReq
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Sector < 0 || req.Sector >= sim.SectorCount ||
+		req.Good < 0 || req.Good >= int(sim.PlayerGoodCount) ||
+		req.Qty <= 0 {
+		http.Error(w, "bad params", http.StatusBadRequest)
+		return
+	}
+	st := s.World.Stations[req.Sector]
+	if st == nil {
+		http.Error(w, "station not found", http.StatusNotFound)
+		return
+	}
+	switch req.Op {
+	case "buy":
+		st.Balance[req.Good] -= req.Qty // игрок купил → станция должна
+	case "sell":
+		st.Balance[req.Good] += req.Qty // игрок продал → планеты должны станции
+	default:
+		http.Error(w, "bad op", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"balance": st.Balance[req.Good]})
 }
 
 func (s *Server) handlePlanet(w http.ResponseWriter, r *http.Request) {

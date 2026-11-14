@@ -1,5 +1,9 @@
 package sim
 
+import (
+	"math"
+)
+
 const (
 	PiratePhaseIdle = iota + 300 // отдых (тик), потом → Orbit
 	PiratePhaseOrbit             // висит на орбите логова, ищет цель
@@ -110,8 +114,17 @@ func (w *World) pirateAttackPhase(p *Pirate) {
 	default: // отстал
 	}
 	// Пересчёт TL и скорости (после switch, перед Return).
-	p.TechLevel = pirateTechLevel(p.Wins)
-	p.Speed = 0.3 + p.SpeedRng*(float64(p.TechLevel)/10.0)
+
+	lair := w.Planets[p.BasePlanet]
+	if p.TechLevel < 15 {
+		upcost := totalCost[p.TechLevel] * (w.techDiscountPirates(p.TechLevel) + 1)
+		if lair.Money >= upcost {
+			lair.Money -= upcost
+			p.TechLevel = pirateTechLevel(p.Wins)
+			p.Speed = 0.3 + p.SpeedRng*(float64(p.TechLevel)/10.0)
+		}
+	}
+	
 	p.Phase = PiratePhaseReturn
 	p.Progress = 0
 }
@@ -151,4 +164,37 @@ func (w *World) pirateFindTarget(p *Pirate, pirateStar int) *Caravan {
 		}
 	}
 	return nil
+}
+
+func (w *World) techDiscountPirates(currentTL int) float64 {
+	if len(w.Pirates) == 0 {
+		return 0
+	}
+	if currentTL == 0 {
+		return 0
+	}
+	sum := 0
+	n := 0
+	for _, p := range w.Pirates {
+		if !p.Alive {
+			continue
+		}
+		sum += p.TechLevel
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	avg := float64(sum) / float64(n)
+	frac := avg - math.Floor(avg)
+	inv := math.Floor(avg) - avg + 1
+	if float64(currentTL) > avg+1 {
+		return inv
+	} else if float64(currentTL) > avg {
+		return frac
+	} else if float64(currentTL) < avg-1 {
+		return -inv
+	} else {
+		return -frac
+	}
 }

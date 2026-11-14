@@ -200,6 +200,8 @@ type World struct {
 	Diplomats []*Diplomat
 	BankersByRace [RaceCount]int // сколько банкиров на расу (для капа 15)
 	LastGTL int // последний GTL, при котором спавнили банкиров
+
+	Stations []*Station
 	
 	Traders []*Trader
 	TradersSpawnedThisTick int // счётчик для лимита
@@ -436,6 +438,12 @@ func NewWorld(seed int64) *World {
 	w.BankersByRace = [RaceCount]int{}
 	w.LastGTL = w.GalaxyTechLevel
 
+	// Станции игрока — 72, по одной на сектор. Пустые (Balance=0).
+	w.Stations = make([]*Station, SectorCount)
+	for i := 0; i < SectorCount; i++ {
+		w.Stations[i] = &Station{Sector: i}
+	}
+
 	return w
 }
 
@@ -462,6 +470,21 @@ func (w *World) IsLegal(p *Planet, g Good) bool {
 		return false
 	}
 	return true
+}
+
+// planetUpgradeStock — пересчёт TargetStock при смене TL планеты.
+// Пропорционально newTL/oldTL, без накопления. count не трогаем.
+func (w *World) planetUpgradeStock(p *Planet, oldTL, newTL int) {
+	if oldTL <= 0 || newTL <= oldTL {
+		return
+	}
+	ratio := float64(newTL) / float64(oldTL)
+	for g := 0; g < int(GoodCount); g++ {
+		p.Market[g].TargetStock = int(float64(p.Market[g].TargetStock) * ratio) * 100
+		if p.Market[g].TargetStock < 1 {
+			p.Market[g].TargetStock = 1
+		}
+	}
 }
 
 func (p *Planet) IsPirateLair() bool {

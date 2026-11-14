@@ -80,7 +80,7 @@
     <div class="ptype" style="color:#8cf; margin-bottom:4px;">player market (8)</div>
     <table>
       <thead><tr>
-        <th>good</th><th>buy</th><th>sell</th><th>count</th>
+        <th>good</th><th>buy</th><th>sell</th><th>count</th><th>balance</th><th>trade</th>
       </tr></thead>
       <tbody id="playerMarketBody"></tbody>
     </table>
@@ -785,17 +785,17 @@ async function pollPlayerMarket() {
       setTimeout(pollPlayerMarket, 1000);
       return;
     }
-    const r = await fetch("/player/" + st.sector);
+    const r = await fetch("/station/" + st.sector);
     if (r.ok) {
       const arr = await r.json();
       wrap.style.display = "flex";
-      renderPlayerMarket(arr);
+      renderPlayerMarket(arr, st.sector);
     }
   } catch (e) { console.error(e); }
   setTimeout(pollPlayerMarket, 1000);
 }
 
-function renderPlayerMarket(arr) {
+function renderPlayerMarket(arr, sector) {
   const tb = document.getElementById("playerMarketBody");
   tb.innerHTML = "";
   for (const m of arr) {
@@ -803,9 +803,34 @@ function renderPlayerMarket(arr) {
     tr.innerHTML = `<td>${PLAYER_GOOD_NAMES[m.good]}</td>
       <td>${m.buy.toFixed(1)}</td>
       <td>${m.sell.toFixed(1)}</td>
-      <td>${m.count}</td>`;
+      <td>${m.count}</td>
+      <td>${m.balance}</td>
+      <td>
+        <button data-buy="${m.good}">buy</button>
+        <button data-sell="${m.good}">sell</button>
+      </td>`;
     tb.appendChild(tr);
   }
+  tb.querySelectorAll("button[data-buy]").forEach(b => {
+    b.addEventListener("click", () => stationTrade(sector, parseInt(b.dataset.buy), "buy"));
+  });
+  tb.querySelectorAll("button[data-sell]").forEach(b => {
+    b.addEventListener("click", () => stationTrade(sector, parseInt(b.dataset.sell), "sell"));
+  });
+}
+
+async function stationTrade(sector, good, op) {
+  const q = prompt("qty:", "100");
+  if (q === null) return;
+  const qty = parseInt(q);
+  if (isNaN(qty) || qty <= 0) return;
+  try {
+    await fetch("/station/trade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sector, good, qty, op })
+    });
+  } catch (e) { console.error(e); }
 }
 
 async function pollSectorMarket() {

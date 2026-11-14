@@ -1,5 +1,9 @@
 package sim
 
+import (
+	"math"
+)
+
 // PlayerGood — 8 «игровых» товаров (старая база). Отдельный тип,
 // чтобы не мешать сим-товарам (GoodCount 38). Стык — через PlayerGoodMap.
 type PlayerGood int
@@ -104,4 +108,66 @@ func (w *World) PlayerMarket(sectorID int) [PlayerGoodCount]PlayerMarketEntry {
 		out[pg] = e
 	}
 	return out
+}
+
+// ---------- Старая модель 8 товаров (копия из old/, потом подгоним) ----------
+
+type OldGoodInfo struct {
+	Name         string
+	BaseStock    int
+	MinPrice     int
+	AveragePrice int
+	MaxPrice     int
+}
+
+// OldGoodsMarket — 8 товаров, старая модель (old/consts.go).
+// Порядок = PlayerGood (food, medicine, technics, luxury, minerals, alcohol, arms, narcotics).
+var OldGoodsMarket = [PlayerGoodCount]OldGoodInfo{
+	{"Food", 300, 17, 30, 43},
+	{"Medicine", 160, 27, 40, 53},
+	{"Technics", 100, 62, 80, 98},
+	{"Luxury", 60, 160, 200, 240},
+	{"Minerals", 250, 8, 12, 16},
+	{"Alcohol", 120, 25, 40, 55},
+	{"Arms", 70, 75, 100, 125},
+	{"Narcotics", 30, 250, 400, 550},
+}
+
+// ---------- Станция игрока ----------
+
+// Station — станция сектора. Своего Count нет: количество берётся из сима
+// (PlayerMarket, 8). Balance — долг: <0 станция должна планетам сектора,
+// >0 планеты должны станции. Алгоритм-телепорт пока не подключён.
+type Station struct {
+	Sector  int
+	Balance [PlayerGoodCount]int
+}
+
+// StationPrice — упрощённая старая формула цены для станции.
+// count — из сима (PlayerMarket.count), ts — старый BaseStock (OldGoodsMarket).
+// Без рас/правительств, всё легально.
+func StationPrice(pg PlayerGood, count int) (buy, sell float64) {
+	gm := &OldGoodsMarket[pg]
+	ts := float64(gm.BaseStock)
+	if ts < 1 {
+		ts = 1
+	}
+	c := float64(count)
+
+	target := float64(gm.AveragePrice)
+	if c < ts {
+		target /= RemapClamped(c, ts*0.1, ts, 0.8, 1)
+	} else {
+		target /= RemapClamped(c, ts, ts*3, 1, 1.2)
+	}
+	if target > float64(gm.MaxPrice) {
+		target = float64(gm.MaxPrice)
+	}
+	if target < float64(gm.MinPrice) {
+		target = float64(gm.MinPrice)
+	}
+
+	buy = math.Max(2, math.Round(target))
+	sell = math.Max(buy/2+1, math.Round(target*0.5-1))
+	return buy, sell
 }

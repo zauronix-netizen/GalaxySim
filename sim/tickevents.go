@@ -73,6 +73,7 @@ func (w *World) checkGoodsCounters(p *Planet) {
 			if p.Money >= cost + p.MoneyRef {
 				p.Money -= cost
 				p.TechLevel++
+				w.planetUpgradeStock(p, p.TechLevel-1, p.TechLevel)
 			}
 		} else if p.TechLevel > w.GalaxyTechLevel+3 && p.TechLevel < 15 {
 			// Упёрлись в потолок ГТУ (или TL=15) — излишек в сейф для банкира.
