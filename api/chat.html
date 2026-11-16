@@ -23,27 +23,37 @@
 </style>
 </head>
 <body>
-
-<div class="tabs" id="tabs">
-  <button data-room="world" class="active">Мир</button>
-  <button data-room="sector">Сектор</button>
-  <button data-room="system">Система</button>
-  <button data-room="planet">Планета</button>
-</div>
-
-<div class="ctx" id="ctx">—</div>
-
-<div id="log"></div>
-
-<div class="row">
-  <input class="nick" id="nick" placeholder="ник" maxlength="20">
-  <input class="text" id="text" placeholder="сообщение…" maxlength="200">
-  <button class="send" id="send">send</button>
+<div style="display:flex; gap:8px; flex:1; min-height:0;">
+  <div style="display:flex; flex-direction:column; flex:1; min-width:0;">
+    <div class="tabs" id="tabs">
+      <button data-room="world" class="active">Мир</button>
+      <button data-room="sector">Сектор</button>
+      <button data-room="system">Система</button>
+      <button data-room="planet">Планета</button>
+    </div>
+    <div class="ctx" id="ctx">—</div>
+    <div id="log"></div>
+    <div class="row">
+      <input class="nick" id="nick" placeholder="ник" maxlength="20">
+      <input class="text" id="text" placeholder="сообщение… (/spawn /despawn /orbit /goto /state)" maxlength="200">
+      <button class="send" id="send">send</button>
+    </div>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:4px;">
+    <canvas id="sysmap" width="400" height="400" style="border:1px solid #444; background:#111;"></canvas>
+    <div class="ctx" id="mapCtx">—</div>
+  </div>
 </div>
 
 <script>
 const params = new URLSearchParams(location.search);
 const planetID = parseInt(params.get("planet") || "0", 10);
+
+const PLANET_COLORS = ["#e05555","#55c855","#b05ad0","#5a9ae0","#e0c040"];
+const ORBIT_K = 0.05;
+let worldDay = 0;
+let sysData = null;
+let shipData = null;
 
 let planet = null;   // {id, star, sector}
 let roomKeys = {};   // "world"/"sector"/"system"/"planet" → "world" / "sector:5" / "system:42" / "planet:1001"
@@ -161,31 +171,205 @@ function updateCtx() {
   }
 }
 
+function getPlanetPosJS(p, day, starId) {
+  const r = p.orbit;
+  const baseAng = p.id * 137.508 * Math.PI / 180 + starId * 37.0 * Math.PI / 180;
+  const speed = ORBIT_K / p.orbit;
+  const ang = baseAng + speed * day;
+  return { x: r * Math.cos(ang), y: r * Math.sin(ang) };
+}
+
+function drawSysMap() {
+  const canvas = document.getElementById("sysmap");
+  if (!canvas || !sysData) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#111"; ctx.fillRect(0, 0, W, H);
+
+  const cx = W/2, cy = H/2, margin = 20;
+  const R_out = Math.min(W, H)/2 - margin;
+  let maxOrbit = 0;
+  for (const p of sysData.planets) if (p.orbit > maxOrbit) maxOrbit = p.orbit;
+  if (maxOrbit <= 0) maxOrbit = 1;
+  const scale = R_out / maxOrbit;
+
+  ctx.lineWidth = 1;
+  for (const p of sysData.planets) {
+    const r = R_out * (p.orbit / maxOrbit);
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.strokeStyle = p.habitable ? "rgba(90,150,230,0.45)" : "rgba(120,120,120,0.35)";
+    ctx.stroke();
+  }
+
+  for (const p of sysData.planets) {
+    const r = R_out * (p.orbit / maxOrbit);
+    const pos = getPlanetPosJS(p, worldDay, sysData.starId);
+    const x = cx + pos.x * scale, y = cy + pos.y * scale;
+    let color = "#808080";
+    if (p.habitable && p.race >= 0 && p.race < 5) color = PLANET_COLORS[p.race];
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+    if (planet && p.id === planet.id) {
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1;
+    }
+  }
+
+  if (shipData) {
+    const r = Math.hypot(shipData.pos.X, shipData.pos.Y);
+    const ang = Math.atan2(shipData.pos.Y, shipData.pos.X);
+    const x = cx + Math.cos(ang) * r * scale;
+    const y = cy + Math.sin(ang) * r * scale;
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2);
+    ctx.fillStyle = "#6f6"; ctx.fill();
+    ctx.fillStyle = "#6f6"; ctx.font = "11px monospace";
+    ctx.fillText("ship=" + shipData.shipId, x + 6, y - 6);
+  }
+
+  ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2);
+  ctx.fillStyle = "#c9a227"; ctx.fill();
+
+  ctx.fillStyle = "#888"; ctx.font = "11px monospace";
+  ctx.fillText(`star=${sysData.starId} sector=${sysData.sector} day=${worldDay}`, 6, 14);
+}
+
+async function loadSystem(starID) {
+  try { const r = await fetch("/system/" + starID); if (r.ok) sysData = await r.json(); } catch (e) { console.error(e); }
+}
+async function loadShip(shipID) {
+  try { const r = await fetch("/mmo/state?ship=" + shipID); if (r.ok) shipData = await r.json(); } catch (e) { console.error(e); }
+}
+async function pollDay() {
+  try { const r = await fetch("/world"); if (r.ok) worldDay = (await r.json()).day; } catch (e) {}
+  setTimeout(pollDay, 1000);
+}
+
+let lastHour = -1;
+
+async function pollShipByHour() {
+  try {
+    const r = await fetch("/world");
+    if (r.ok) {
+      const j = await r.json();
+      worldDay = j.day;
+      if (j.hour !== lastHour) {
+        lastHour = j.hour;
+        const sid = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+        if (sid) await loadShip(sid);
+      }
+    }
+  } catch (e) {}
+  setTimeout(pollShipByHour, 500);
+}
+
 // --- отправка ---
 async function send() {
-  const room = roomKeys[activeTab];
-  if (!room) return;
   const text = textEl.value.trim();
   if (!text) return;
+  if (text.startsWith("/")) {
+    textEl.value = "";
+    await handleCommand(text);
+    return;
+  }
+  const room = roomKeys[activeTab];
+  if (!room) return;
   const nick = (nickEl.value.trim() || "anon").slice(0, 20);
   try {
     const r = await fetch("/chat/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room, nick, text }),
     });
-    if (!r.ok) {
-      appendSystem("ошибка отправки: " + r.status);
-      return;
-    }
+    if (!r.ok) { appendSystem("ошибка отправки: " + r.status); return; }
     textEl.value = "";
-    // не ждём polling — сразу подтянем
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     poll();
+  } catch (e) { appendSystem("ошибка сети"); console.error(e); }
+}
+
+async function handleCommand(text) {
+  const parts = text.split(/\s+/);
+  const cmd = parts[0];
+  const sid = () => parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+  const shipIdOrArg = (idx) => parseInt(parts[idx] || "0", 10);
+
+  try {
+    if (cmd === "/spawn") {
+      if (!planet) { appendSystem("нет планеты (?planet)"); return; }
+      const r = await fetch("/mmo/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: 1, systemId: planet.star, dockId: planet.id }),
+      });
+      if (!r.ok) { appendSystem("spawn: ошибка " + r.status); return; }
+      const j = await r.json();
+      localStorage.setItem("gs_ship_id", j.shipId);
+      appendSystem(`spawn: ship=${j.shipId} system=${j.systemId} dock=${j.dockId}`);
+      await loadShip(j.shipId);
+
+    } else if (cmd === "/despawn") {
+      const id = sid();
+      if (!id) { appendSystem("despawn: нет shipId"); return; }
+      const r = await fetch("/mmo/despawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shipId: id }),
+      });
+      if (!r.ok) { appendSystem("despawn: ошибка " + r.status); return; }
+      localStorage.removeItem("gs_ship_id");
+      shipData = null;
+      appendSystem("despawn: ship=" + id);
+
+    } else if (cmd === "/orbit") {
+      const id = sid();
+      if (!id) { appendSystem("orbit: нет shipId"); return; }
+      const pid = shipIdOrArg(1) || (planet ? planet.id : 0);
+      const rad = parseFloat(parts[2] || "0.15");
+      const r = await fetch("/mmo/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: 1, shipId: id, kind: 0, planet: pid, radius: rad }),
+      });
+      if (!r.ok) { appendSystem("orbit: ошибка " + r.status); return; }
+      const j = await r.json();
+      appendSystem(`orbit: eta=${j.eta}`);
+      await loadShip(id);
+
+    } else if (cmd === "/goto") {
+      const id = sid();
+      if (!id) { appendSystem("goto: нет shipId"); return; }
+      const x = parseFloat(parts[1] || "0");
+      const y = parseFloat(parts[2] || "0");
+      const r = await fetch("/mmo/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: 1, shipId: id, kind: 1, target: { X: x, Y: y } }),
+      });
+      if (!r.ok) { appendSystem("goto: ошибка " + r.status); return; }
+      const j = await r.json();
+      appendSystem(`goto: eta=${j.eta}`);
+      await loadShip(id);
+
+    } else if (cmd === "/state") {
+      const id = sid();
+      if (!id) { appendSystem("state: нет shipId"); return; }
+      await loadShip(id);
+      if (shipData) {
+        appendSystem(
+          `state: pos=(${shipData.pos.X.toFixed(3)},${shipData.pos.Y.toFixed(3)}) ` +
+          `docked=${shipData.docked} eta=${shipData.eta}`
+        );
+      } else {
+        appendSystem("state: нет корабля");
+      }
+
+    } else {
+      appendSystem("неизвестная команда: " + cmd);
+    }
   } catch (e) {
-    appendSystem("ошибка сети");
-    console.error(e);
+    appendSystem("ошибка сети: " + e.message);
   }
+  drawSysMap();
 }
 
 document.getElementById("send").addEventListener("click", send);
@@ -199,6 +383,11 @@ textEl.addEventListener("keydown", (e) => {
   buildRoomKeys();
   updateTabsState();
   switchRoom();
+  if (planet) await loadSystem(planet.star);
+  const sid = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+  if (sid) await loadShip(sid);
+  pollShipByHour();          // <-- вместо pollDay()
+  setInterval(drawSysMap, 1000);
 })();
 </script>
 

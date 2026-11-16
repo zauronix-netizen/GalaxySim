@@ -3,6 +3,7 @@ package api
 import (
 	_ "embed"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strconv"
 	"io"
@@ -38,7 +39,40 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/chat", s.handleChatPage)
 	mux.HandleFunc("/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("/admin", s.handleAdmin)
+	mux.HandleFunc("/mmo/state", s.handleMMOState)
+	mux.HandleFunc("/mmo/command", s.handleMMOCommand)
+	mux.HandleFunc("/mmo/spawn", s.handleMMOSpawn)
+	mux.HandleFunc("/mmo/despawn", s.handleMMODespawn)
 	mux.HandleFunc("/", s.handleIndex)
+}
+
+type MMOStateJSON struct {
+	ShipID      int      `json:"shipId"`
+	PlayerID    int      `json:"playerId"`
+	SystemID    int      `json:"systemId"`
+	Pos         sim.Vec2 `json:"pos"`
+	Vel         sim.Vec2 `json:"vel"`
+	Docked      bool     `json:"docked"`
+	DockID      int      `json:"dockId"`
+	OrbitPlanet int      `json:"orbitPlanet"`
+	OrbitRadius float64  `json:"orbitRadius"`
+	ETA         int      `json:"eta"`
+	Kind        int      `json:"kind"`
+}
+
+type MMOCommandJSON struct {
+	PlayerID int      `json:"playerId"`
+	ShipID   int      `json:"shipId"`
+	Kind     int      `json:"kind"`
+	Planet   int      `json:"planet"`
+	Radius   float64  `json:"radius"`
+	Target   sim.Vec2 `json:"target"`
+}
+
+type MMOSpawnJSON struct {
+	PlayerID int `json:"playerId"`
+	SystemID int `json:"systemId"`
+	DockID   int `json:"dockId"`
 }
 
 type SectorMarketJSON struct {
@@ -46,6 +80,7 @@ type SectorMarketJSON struct {
 	Buy   float64 `json:"buy"`
 	Sell  float64 `json:"sell"`
 	Count int     `json:"count"`
+	Stock int     `json:"stock"`
 }
 
 type StationGoodJSON struct {
@@ -53,6 +88,7 @@ type StationGoodJSON struct {
 	Buy     float64 `json:"buy"`
 	Sell    float64 `json:"sell"`
 	Count   int     `json:"count"`
+	Stock   int     `json:"stock"`
 	Balance int     `json:"balance"`
 }
 
@@ -82,6 +118,84 @@ type LairJSON struct {
 	Cargo     []int   `json:"cargo"` // порядок GoodsTextOrder
 }
 
+func (s *Server) handleMMOState(w http.ResponseWriter, r *http.Request) {
+	shipIDStr := r.URL.Query().Get("ship")
+	shipID, err := strconv.Atoi(shipIDStr)
+	if err != nil {
+		http.Error(w, "bad ship id", http.StatusBadRequest)
+		return
+	}
+	sh, ok := s.World.Ships.Ships[shipID]
+	if !ok {
+		http.Error(w, "ship not found", http.StatusNotFound)
+		return
+	}
+	out := MMOStateJSON{
+		ShipID: sh.ID, PlayerID: sh.PlayerID, SystemID: sh.SystemID,
+		Pos: sh.Pos, Vel: sh.Vel, Docked: sh.Docked, DockID: sh.DockID,
+		OrbitPlanet: sh.OrbitPlanet, OrbitRadius: sh.OrbitRadius,
+	}
+	if sh.Target != nil {
+		out.ETA = sh.Target.ETA
+		out.Kind = int(sh.Target.Kind) + 1
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (s *Server) handleMMOCommand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	var req MMOCommandJSON
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	cmd := sim.ShipCommand{
+		PlayerID: req.PlayerID, ShipID: req.ShipID,
+		Kind: sim.MoveKind(req.Kind), Planet: req.Planet,
+		Radius: req.Radius, Target: req.Target,
+	}
+	sh, ok := s.World.Ships.ApplyCommand(cmd)
+	if !ok {
+		http.Error(w, "ship not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "shipId": sh.ID, "eta": sh.Target.ETA,
+	})
+}
+
+func (s *Server) handleMMOSpawn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	var req MMOSpawnJSON
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	sh := s.World.Ships.Spawn(req.PlayerID, req.SystemID, req.DockID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "shipId": sh.ID, "systemId": sh.SystemID, "dockId": sh.DockID,
+	})
+}
+
 func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/player/"):]
 	id, err := strconv.Atoi(idStr)
@@ -107,11 +221,11 @@ func (s *Server) handleSector(w http.ResponseWriter, r *http.Request) {
 		Market: make([]SectorMarketJSON, 0, len(sim.GoodsTextOrder)),
 	}
 
-	// Сводка: звёзды, планеты, необитаемые, логова.
 	type acc struct {
 		sumBuy   float64
 		sumSell  float64
 		sumCount int
+		sumStock int
 		n        int
 	}
 	var mkt [sim.GoodCount]acc
@@ -130,13 +244,14 @@ func (s *Server) handleSector(w http.ResponseWriter, r *http.Request) {
 				out.Lairs++
 			}
 			if !p.Habitable || p.IsPirateLair() {
-				continue // в рынок не входят
+				continue
 			}
 			for g := 0; g < int(sim.GoodCount); g++ {
 				m := &p.Market[g]
 				mkt[g].sumBuy += m.PurchasePrice
 				mkt[g].sumSell += m.BaseSalePrice
 				mkt[g].sumCount += m.Count
+				mkt[g].sumStock += m.TargetStock
 				mkt[g].n++
 			}
 		}
@@ -154,6 +269,7 @@ func (s *Server) handleSector(w http.ResponseWriter, r *http.Request) {
 			Buy:   buy,
 			Sell:  sell,
 			Count: a.sumCount,
+			Stock: a.sumStock,
 		})
 	}
 
@@ -189,7 +305,33 @@ func (s *Server) handleLair(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+func (s *Server) handleMMODespawn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
+	var req struct{ ShipID int `json:"shipId"` }
+	if err := json.Unmarshal(body, &req); err != nil || req.ShipID <= 0 {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	delete(s.World.Ships.Ships, req.ShipID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "shipId": req.ShipID})
+}
+
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
+
+	// Только localhost (127.0.0.1 / ::1).
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || (host != "127.0.0.1" && host != "::1") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// ... остальное как есть
+
 	v := r.URL.Query().Get("ms")
 	if v == "" {
 		http.Error(w, "usage: /admin?ms=100 (0=auto)", http.StatusBadRequest)
@@ -443,14 +585,34 @@ func (s *Server) handleStation(w http.ResponseWriter, r *http.Request) {
 	st := s.World.Stations[id]
 	pm := s.World.PlayerMarket(id)
 
+	// Сток по категориям игрока: сумма TargetStock по маппингу PlayerGoodMap,
+	// по всем обитаемым непиратским планетам сектора.
+	var stock [sim.PlayerGoodCount]int
+	for _, stp := range s.World.Stars {
+		if stp.Sector != id {
+			continue
+		}
+		for _, p := range s.World.PlanetMap[stp.ID] {
+			if !p.Habitable || p.IsPirateLair() {
+				continue
+			}
+			for pg := 0; pg < int(sim.PlayerGoodCount); pg++ {
+				for _, g := range sim.PlayerGoodMap[pg] {
+					stock[pg] += p.Market[g].TargetStock
+				}
+			}
+		}
+	}
+
 	out := make([]StationGoodJSON, 0, sim.PlayerGoodCount)
 	for pg := 0; pg < int(sim.PlayerGoodCount); pg++ {
-		buy, sell := s.World.StationPrice(sim.PlayerGood(pg), pm[pg].Count)
+		buy, sell := s.World.StationPrice(sim.PlayerGood(pg), pm[pg].Count, stock[pg])
 		out = append(out, StationGoodJSON{
 			Good:    pg,
 			Buy:     buy,
 			Sell:    sell,
 			Count:   pm[pg].Count,
+			Stock:   stock[pg],
 			Balance: st.Balance[pg],
 		})
 	}
@@ -547,6 +709,8 @@ func (s *Server) handlePlanet(w http.ResponseWriter, r *http.Request) {
 
 type WorldJSON struct {
 	Day               int     `json:"day"`
+	Hour              int     `json:"hour"`
+	Mins              int     `json:"mins"`
 	GalTech           int     `json:"galTech"`
 	Stars             int     `json:"stars"`
 	Planets           int     `json:"planets"`
@@ -563,6 +727,8 @@ type WorldJSON struct {
 func (s *Server) handleWorld(w http.ResponseWriter, r *http.Request) {
 	wj := WorldJSON{
 		Day:         s.World.Day,
+		Hour:        s.World.Hour,
+		Mins:        s.World.Mins,
 		GalTech:     s.World.GalaxyTechLevel,
 		Stars:       len(s.World.Stars),
 		Planets:     len(s.World.Planets),

@@ -11,19 +11,21 @@ import (
 	"galaxysim/sim"
 )
 
-func tickInterval(day int) time.Duration {
-	const daysInYear = 576
-	if day >= 10*daysInYear { // год >= 3310
-		return 500 * time.Millisecond
+func tickInterval(w *sim.World) time.Duration {
+	if w.Day < sim.GalaxyWarmupTurns {
+		return 10 * time.Millisecond // warmup: быстро
 	}
-	return 250 * time.Millisecond
+	if !w.MMOReady {
+		return 100 * time.Millisecond // до GTL 4: экономика, средне
+	}
+	return 10 * time.Millisecond // после GTL 4: MMO, мелкий тик
 }
 
 func currentTickMs(w *sim.World) time.Duration {
 	if w.TickOverrideMs > 0 {
 		return time.Duration(w.TickOverrideMs) * time.Millisecond
 	}
-	return tickInterval(w.Day)
+	return tickInterval(w)
 }
 
 func main() {

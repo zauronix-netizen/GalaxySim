@@ -142,22 +142,18 @@ type Station struct {
 	Balance [PlayerGoodCount]int
 }
 
-// StationPrice — упрощённая старая формула цены для станции.
-// count — из сима (PlayerMarket.count), ts — старый BaseStock (OldGoodsMarket).
-// Без рас/правительств, всё легально.
-func (w *World) StationPrice(pg PlayerGood, count int) (buy, sell float64) {
+// StationPrice — цена станции сектора от общего стока (сумма TargetStock
+// по маппингу PlayerGoodMap) и суммарного count. База — OldGoodsMarket
+// (Min/Avg/Max), без рас/правительств/эко/радиуса/pop (агрегат сектора).
+// Логика реакции на count/stock — как в UpdateMarketState (targetPrice),
+// но без PriceState: targetPrice сразу становится purchase.
+func (w *World) StationPrice(pg PlayerGood, count, stock int) (buy, sell float64) {
 	gm := &OldGoodsMarket[pg]
-	ts := float64(gm.BaseStock)
+	ts := float64(stock)
 	if ts < 1 {
 		ts = 1
 	}
-
-	// Нормализация склада под старый BaseStock с учётом GTL.
-	// count (сим, 8) → «эффективный склад» в шкале старой модели.
-	c := float64(count) / (1000.0 * float64(w.GalaxyTechLevel))
-	if c < 1 {
-		c = 1
-	}
+	c := float64(count)
 
 	target := float64(gm.AveragePrice)
 	if c < ts {
@@ -173,7 +169,8 @@ func (w *World) StationPrice(pg PlayerGood, count int) (buy, sell float64) {
 	}
 
 	buy = math.Max(2, math.Round(target))
-	sell = math.Max(buy/2+1, math.Round(target*0.5-1))
+	sell = math.Max(buy/2+1,
+		math.Round(target*RemapClamped(c, ts, ts*2.2, 0.99, 0.5)-1))
 	return buy, sell
 }
 

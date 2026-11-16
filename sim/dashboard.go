@@ -19,8 +19,8 @@ func (w *World) RenderDashboard(took time.Duration) string {
 	put(1, "=== GalaxySim "+strings.Repeat("=", 62))
 
 	// Date/took (row 6)
-	put(2, fmt.Sprintf("date=%s (day=%d) | took=%s",
-		dayToDate(w.Day), w.Day, took))
+	put(2, fmt.Sprintf("date=%s (day=%d) %02d:%02d | took=%s",
+		dayToDate(w.Day), w.Day, w.Hour, w.Mins, took))
 
 	// Separator (row 7)
 	put(3, strings.Repeat("-", 76))

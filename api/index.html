@@ -62,16 +62,17 @@
 <h3>Карта галактики / система</h3>
 <div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
   <canvas id="map" width="800" height="560" style="border:1px solid #444; background:#111;"></canvas>
-  <canvas id="sector" width="460" height="460" style="border:1px solid #444; background:#111;"></canvas>
+  <div>
+    <canvas id="sector" width="460" height="460" style="border:1px solid #444; background:#111;"></canvas>
+    <div id="sectorSummary" class="stat" style="margin-top:8px;">—</div>
+  </div>
 </div>
-
-<div id="sectorSummary" class="stat" style="margin-top:8px;">—</div>
 <div id="sectorMarketWrap" style="margin-top:8px; display:none; gap:16px; align-items:flex-start;">
   <div>
     <div class="ptype" style="color:#8cf; margin-bottom:4px;">sector market (38)</div>
     <table>
       <thead><tr>
-        <th>good</th><th>buy</th><th>sell</th><th>count</th>
+        <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th>
       </tr></thead>
       <tbody id="sectorMarketBody"></tbody>
     </table>
@@ -80,7 +81,7 @@
     <div class="ptype" style="color:#8cf; margin-bottom:4px;">player market (8)</div>
     <table>
       <thead><tr>
-        <th>good</th><th>buy</th><th>sell</th><th>count</th><th>balance</th><th>trade</th>
+        <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th><th>balance</th><th>trade</th>
       </tr></thead>
       <tbody id="playerMarketBody"></tbody>
     </table>
@@ -356,7 +357,7 @@ document.getElementById("toggle").addEventListener("click", () => {
 document.getElementById("chatBtn").addEventListener("click", () => {
   const id = planets[active];
   const url = "/chat?planet=" + encodeURIComponent(id);
-  window.open(url, "gs-chat", "width=420,height=760");
+  window.open(url, "gs-chat", "width=1000,height=760");
 });
 
 // ---------- Карта галактики (1+4: convex hull + цвет) ----------
@@ -804,6 +805,7 @@ function renderPlayerMarket(arr, sector) {
       <td>${m.buy.toFixed(1)}</td>
       <td>${m.sell.toFixed(1)}</td>
       <td>${m.count}</td>
+      <td>${m.stock}</td>
       <td>${m.balance}</td>
       <td>
         <button data-buy="${m.good}">buy</button>
@@ -865,7 +867,8 @@ function renderSectorMarket(s) {
     tr.innerHTML = `<td>${GOOD_NAMES[m.good]}</td>
       <td>${m.buy.toFixed(1)}</td>
       <td>${m.sell.toFixed(1)}</td>
-      <td>${m.count}</td>`;
+      <td>${m.count}</td>
+      <td>${m.stock}</td>`;
     tb.appendChild(tr);
   }
 }

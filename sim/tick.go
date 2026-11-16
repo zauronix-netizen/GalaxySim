@@ -12,28 +12,44 @@ var (
 )
 
 func (w *World) SimTick() {
-	w.Events = w.Events[:0]
-	w.TickEvents = w.TickEvents[:0] // чистим в начале: EconSummary читает их после SimTick
-	w.TradersSpawnedThisTick = 0 // <-- сбрасываем на каждом тике
-	if w.Day >= GalaxyWarmupTurns {
-		w.phaseMovement()
-		w.phaseSpawn()
-		w.phaseEconomy()
-		w.phaseStations()   // <-- станции: Balance>0 → планеты
-		w.phaseTraders()
-		w.LogTickEvents()
-		w.phaseRelations()
+	if !w.MMOReady {
+		w.SimTickFast()
+	} else if len(w.Ships.Ships) == 0 {
+		w.SimTickSuperFast()
+	} else {
+		w.SimTickSlow()
 	}
+}
+
+func (w *World) SimTickFast() {
+	w.Events = w.Events[:0]
+	w.TickEvents = w.TickEvents[:0]
+	w.TradersSpawnedThisTick = 0
+
+	w.Day++
+
+	w.phaseMovement()
+	w.phaseSpawn()
+	w.phaseEconomy()
+	w.phaseStations()
+	w.Ships.Tick(w) // игрок (в fast — тоже каждый тик, хоть игроков ещё нет)
+	w.phaseTraders()
+	w.LogTickEvents()
+	w.phaseRelations()
+
 	if !InflationOff && w.Day > 0 && w.Day%TurnsPerYear == 0 {
 		w.ComputeGlobalGoodsPriceBands()
 	}
-
-	// ГТУ — раз в год, независимо от инфляции.
 	if w.Day > 0 && w.Day%TurnsPerYear == 0 {
 		w.computeGalaxyTechLevel()
 	}
 
-	// Банкиры: по 1 на расу при каждом GTL++ (кап 15 на расу).
+	// GTL 4 → мир готов к MMO. Больше никого не ждём.
+	if w.GalaxyTechLevel >= 4 {
+		w.MMOReady = true
+	}
+
+	// Банкиры при GTL++.
 	if w.GalaxyTechLevel > w.LastGTL {
 		w.LastGTL = w.GalaxyTechLevel
 		for r := 0; r < int(RaceCount); r++ {
@@ -41,7 +57,6 @@ func (w *World) SimTick() {
 				continue
 			}
 			race := Race(r)
-			// Случайная обитаемая планета этой расы.
 			var candidates []*Planet
 			for _, p := range w.Planets {
 				if p.Habitable && p.Race == race {
@@ -57,8 +72,11 @@ func (w *World) SimTick() {
 		}
 	}
 
-	// повторный спавн трейдеров 
-	if w.Day == GalaxyWarmupTurns + 1 * TurnsPerYear || w.Day == GalaxyWarmupTurns + 2 * TurnsPerYear || w.Day == GalaxyWarmupTurns + 3 * TurnsPerYear || w.Day == GalaxyWarmupTurns + 4 * TurnsPerYear {
+	// Повторный спавн трейдеров.
+	if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
 		for _, star := range w.Stars {
 			planets := w.PlanetMap[star.ID]
 			if len(planets) > 3 && planets[3].Habitable {
@@ -67,10 +85,7 @@ func (w *World) SimTick() {
 		}
 	}
 
-
-	// ... (караваны/пираты/лайнеры/дипломаты — как было)
-
-	// Волны караванов: +0.5, +1.5, +2.5, +3.5, +4.5 года от прогрева.
+	// Волны караванов.
 	for i := 0; i < CaravanWaves; i++ {
 		waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
 		if w.Day == waveDay {
@@ -82,7 +97,186 @@ func (w *World) SimTick() {
 	if len(w.News) > MaxNews {
 		w.News = w.News[len(w.News)-MaxNews:]
 	}
-	w.Day++
+}
+
+func (w *World) SimTickSuperFast() {
+	oldHour := w.Hour
+
+	// Часы без минут: 1 тик = 1 час, 32 часа = 1 день.
+	w.Hour++
+	if w.Hour >= 32 {
+		w.Hour = 0
+		w.Day++
+	}
+
+	hourChanged := w.Hour != oldHour
+	dayChanged := hourChanged && w.Hour == 0
+
+	// Каждый тик — игрок (пусто, кораблей нет).
+	w.Ships.Tick(w)
+
+	// Раз в час — экстренные (пока пусто, слот на будущее).
+	if hourChanged {
+		// w.phaseUrgent() — позже
+	}
+
+	// Раз в день — экономика/агенты/станции.
+	if dayChanged {
+		w.Events = w.Events[:0]
+		w.TickEvents = w.TickEvents[:0]
+		w.TradersSpawnedThisTick = 0
+
+		w.phaseMovement()
+		w.phaseSpawn()
+		w.phaseEconomy()
+		w.phaseStations()
+		w.phaseTraders()
+		w.LogTickEvents()
+		w.phaseRelations()
+
+		if w.Day > 0 && w.Day%TurnsPerYear == 0 {
+			if !InflationOff {
+				w.ComputeGlobalGoodsPriceBands()
+			}
+			w.computeGalaxyTechLevel()
+		}
+		if w.GalaxyTechLevel > w.LastGTL {
+			w.LastGTL = w.GalaxyTechLevel
+			for r := 0; r < int(RaceCount); r++ {
+				if w.BankersByRace[r] >= 15 {
+					continue
+				}
+				race := Race(r)
+				var candidates []*Planet
+				for _, p := range w.Planets {
+					if p.Habitable && p.Race == race {
+						candidates = append(candidates, p)
+					}
+				}
+				if len(candidates) == 0 {
+					continue
+				}
+				p := candidates[w.Rng.Intn(len(candidates))]
+				w.SpawnBanker(p.ID, race)
+				w.BankersByRace[r]++
+			}
+		}
+		if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
+			w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
+			w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
+			w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
+			for _, star := range w.Stars {
+				planets := w.PlanetMap[star.ID]
+				if len(planets) > 3 && planets[3].Habitable {
+					w.SpawnTrader(planets[3].ID, GoodFood)
+				}
+			}
+		}
+		for i := 0; i < CaravanWaves; i++ {
+			waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
+			if w.Day == waveDay {
+				w.SpawnCaravanWave()
+				break
+			}
+		}
+		if len(w.News) > MaxNews {
+			w.News = w.News[len(w.News)-MaxNews:]
+		}
+	}
+}
+
+func (w *World) SimTickSlow() {
+	oldDay := w.Day
+
+	// Календарь: 64 мин × 32 часа = 2048 тиков/день.
+	w.Mins++
+	if w.Mins >= 64 {
+		w.Mins = 0
+		w.Hour++
+		if w.Hour >= 32 {
+			w.Hour = 0
+			w.Day++
+		}
+	}
+
+	dayChanged := w.Day != oldDay
+
+	// Каждый тик — только игрок.
+	w.Ships.Tick(w)
+
+	if !dayChanged {
+		return
+	}
+
+	// ===== Раз в день =====
+	w.Events = w.Events[:0]
+	w.TickEvents = w.TickEvents[:0]
+	w.TradersSpawnedThisTick = 0
+
+	w.phaseMovement()
+	w.phaseSpawn()
+	w.phaseEconomy()
+	w.phaseStations()
+	w.phaseTraders()
+	w.LogTickEvents()
+	w.phaseRelations()
+
+	// Годовые.
+	if w.Day > 0 && w.Day%TurnsPerYear == 0 {
+		if !InflationOff {
+			w.ComputeGlobalGoodsPriceBands()
+		}
+		w.computeGalaxyTechLevel()
+	}
+
+	// Банкиры при GTL++.
+	if w.GalaxyTechLevel > w.LastGTL {
+		w.LastGTL = w.GalaxyTechLevel
+		for r := 0; r < int(RaceCount); r++ {
+			if w.BankersByRace[r] >= 15 {
+				continue
+			}
+			race := Race(r)
+			var candidates []*Planet
+			for _, p := range w.Planets {
+				if p.Habitable && p.Race == race {
+					candidates = append(candidates, p)
+				}
+			}
+			if len(candidates) == 0 {
+				continue
+			}
+			p := candidates[w.Rng.Intn(len(candidates))]
+			w.SpawnBanker(p.ID, race)
+			w.BankersByRace[r]++
+		}
+	}
+
+	// Повторный спавн трейдеров.
+	if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
+		w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
+		for _, star := range w.Stars {
+			planets := w.PlanetMap[star.ID]
+			if len(planets) > 3 && planets[3].Habitable {
+				w.SpawnTrader(planets[3].ID, GoodFood)
+			}
+		}
+	}
+
+	// Волны караванов.
+	for i := 0; i < CaravanWaves; i++ {
+		waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
+		if w.Day == waveDay {
+			w.SpawnCaravanWave()
+			break
+		}
+	}
+
+	if len(w.News) > MaxNews {
+		w.News = w.News[len(w.News)-MaxNews:]
+	}
 }
 
 func (w *World) legDistance(fromPlanet, toPlanet, phase int, routeIdx int, route []int) float64 {

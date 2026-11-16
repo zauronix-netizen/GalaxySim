@@ -177,6 +177,8 @@ type Planet struct {
 
 type World struct {
 	Day       int
+	Hour	  int
+	Mins	  int
 	Rng       *rand.Rand
 	Stars     []*Star
 	Planets   []*Planet
@@ -230,6 +232,14 @@ type World struct {
 	DeathsOther int
 	
 	TickOverrideMs int // 0 = авто (tickInterval), иначе фикс
+
+	Ships *ShipHub
+	
+	TradersSpawnedYear int
+	CaravanSpawnedYear int
+
+	MMOReady bool // мир дорос до GTL 4, можно пускать игроков
+
 }
 
 type Event struct {
@@ -443,6 +453,8 @@ func NewWorld(seed int64) *World {
 	for i := 0; i < SectorCount; i++ {
 		w.Stations[i] = &Station{Sector: i}
 	}
+	
+	w.Ships = NewShipHub()
 
 	return w
 }
@@ -480,7 +492,7 @@ func (w *World) planetUpgradeStock(p *Planet, oldTL, newTL int) {
 	}
 	ratio := float64(newTL) / float64(oldTL)
 	for g := 0; g < int(GoodCount); g++ {
-		p.Market[g].TargetStock = int(float64(p.Market[g].TargetStock) * ratio) * 100
+		p.Market[g].TargetStock = int(float64(p.Market[g].TargetStock) * ratio)
 		if p.Market[g].TargetStock < 1 {
 			p.Market[g].TargetStock = 1
 		}
