@@ -1,11 +1,15 @@
 package sim
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // ShipHub — все корабли игроков. Такт — раз в тик симуляции.
 type ShipHub struct {
 	Ships  map[int]*Ship
 	NextID int
+	Mu     sync.Mutex
 }
 
 func NewShipHub() *ShipHub {
@@ -20,6 +24,8 @@ const (
 
 // Spawn — создать корабль в доке у планеты (ручной spawn пока).
 func (h *ShipHub) Spawn(playerID, systemID, dockID int) *Ship {
+	h.Mu.Lock()
+	defer h.Mu.Unlock()
 	s := &Ship{
 		ID: h.NextID, PlayerID: playerID, SystemID: systemID,
 		Docked: true, DockID: dockID,
@@ -41,10 +47,26 @@ const ShipSpeed = 0.5 / TicksPerDay
 //   MoveOrbit / MoveDock — ETA=1 (манёвр у планеты).
 //   MoveGoto / MoveEdge — ETA = ceil(dist(Pos, target) / ShipSpeed).
 // Гравитация — только клиент, в ETA не входит.
-func (h *ShipHub) ApplyCommand(cmd ShipCommand) (*Ship, bool) {
+func (h *ShipHub) ApplyCommand(w *World, cmd ShipCommand) (*Ship, bool) {
+	h.Mu.Lock()
+	defer h.Mu.Unlock()
 	s, ok := h.Ships[cmd.ShipID]
 	if !ok {
 		return nil, false
+	}
+
+	// MoveUndock — мгновенно: снять док, встать в точку планеты. Без MoveOrder.
+	if cmd.Kind == MoveUndock {
+		if cmd.Planet >= 0 && cmd.Planet < len(w.Planets) {
+			px, py := w.getPlanetPos(w.Planets[cmd.Planet], w.Day)
+			s.Pos = Vec2{X: px, Y: py}
+		}
+		s.Docked = false
+		s.DockID = -1
+		s.OrbitPlanet = cmd.Planet
+		s.OrbitRadius = 0
+		s.Target = nil
+		return s, true
 	}
 
 	eta := 1
@@ -59,12 +81,26 @@ func (h *ShipHub) ApplyCommand(cmd ShipCommand) (*Ship, bool) {
 		}
 	}
 
+/*
+
+	case MoveUndock:
+		// позиция планеты (dockID = cmd.Planet)
+		if cmd.Planet >= 0 && cmd.Planet < len(w.Planets) {
+			px, py := w.getPlanetPos(w.Planets[cmd.Planet], w.Day)
+			cmd.Target = Vec2{X: px, Y: py}
+		}
+		eta = 1
+	}
+
+*/
+
 	s.Target = &MoveOrder{
 		Kind:   cmd.Kind,
 		Planet: cmd.Planet,
 		Radius: cmd.Radius,
 		Target: cmd.Target,
 		ETA:    eta,
+		Start:  s.Pos,
 	}
 	return s, true
 }
@@ -72,6 +108,8 @@ func (h *ShipHub) ApplyCommand(cmd ShipCommand) (*Ship, bool) {
 // Tick — один ход (из SimTick). Пока без физики: ETA--, по прибытии
 // ставим Docked/Pos заглушкой.
 func (h *ShipHub) Tick(w *World) {
+	h.Mu.Lock()
+	defer h.Mu.Unlock()
 	for _, s := range h.Ships {
 		if s.Target == nil {
 			continue
@@ -95,6 +133,11 @@ func (h *ShipHub) Tick(w *World) {
 				s.DockID = s.Target.Planet
 				s.OrbitPlanet = s.Target.Planet
 				s.OrbitRadius = 0
+			case MoveUndock:
+				s.Docked = false
+				s.DockID = -1
+				s.OrbitPlanet = s.Target.Planet
+				s.OrbitRadius = 0				
 			case MoveGoto, MoveEdge:
 				s.Docked = false
 				s.DockID = -1

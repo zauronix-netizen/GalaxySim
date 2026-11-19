@@ -53,7 +53,7 @@ func (w *World) SpawnCaravanAt(planetID int) *Caravan {
 		Speed:      0.2 + rngSpeed*(float64(tl)/10.0),
 		JumpRange:  30,
 		TechLevel:  tl,
-		CargoMax:   tl * 100,
+		CargoMax:   tl * 10,
 		Money:      money,
 		Fuel:       CaravanFuelMax,
 		FuelMax:    CaravanFuelMax,
@@ -299,7 +299,7 @@ func (w *World) caravanLoad(c *Caravan) (dead bool) {
 			p.Money += upcost * 0.01
 			c.TechLevel++
 			c.Speed = 0.2 + c.SpeedRng*(float64(c.TechLevel)/10.0)
-			c.CargoMax = c.TechLevel * 100
+			c.CargoMax = c.TechLevel * 10
 		}
 	}
 

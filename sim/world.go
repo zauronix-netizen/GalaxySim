@@ -237,6 +237,8 @@ type World struct {
 	
 	TradersSpawnedYear int
 	CaravanSpawnedYear int
+	CaravanWavesSpawned int // доп. волны по GTL++ (счётчик)
+	NextCaravanWaveDay  int // день следующей доп. волны (0 = нет)
 
 	MMOReady bool // мир дорос до GTL 4, можно пускать игроков
 

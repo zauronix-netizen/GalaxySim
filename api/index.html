@@ -33,34 +33,52 @@
   table, th, td { user-select: text; }
   button { user-select: none; }
   .pinput { width: 70px; }
+
+  /* --- адаптив: карты в строку, таблицы сжимаются --- */
+  #map, #sector {
+    max-width: 100%;
+    height: auto;
+    display: block;
+  }
+  .map-row {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+  }
+  .map-row > div { min-width: 0; }
+  .tables { gap: 10px; }
+  .ptable { flex: 1 1 0; min-width: 300px; }
+  th, td { padding: 2px 5px; font-size: 1.0em; }
+  
 </style>
 </head>
 <body>
 
 <div class="topbar">
   <span class="day">date: <span id="day">—</span></span>
-  <span class="stat">GalTech: <span id="galtech">—</span></span>
+  <span class="stat">Tech: <span id="galtech">—</span></span>
 
   <button id="toggle">стоп</button>
   <button id="chatBtn">Chat</button>
 
   <span class="stat" style="border-left: 1px solid #555; padding-left: 16px;">
-    Sector: <span id="activeSector">—</span>
+    Sec: <span id="activeSector">—</span>
   </span>
-  <span class="stat">Star: <span id="activeStar">—</span></span>
-  <span class="stat">Planet: <span id="activePlanet">—</span></span>
-  <span class="stat">Tech: <span id="activeTech">—</span></span>
-  <span class="stat">Race: <span id="activeRace">—</span></span>
+  <span class="stat">Str: <span id="activeStar">—</span></span>
+  <span class="stat">Plt: <span id="activePlanet">—</span></span>
+  <span class="stat">Tec: <span id="activeTech">—</span></span>
+  <span class="stat">Rac: <span id="activeRace">—</span></span>
   <span class="stat">Eco: <span id="activeEconomy">—</span></span>
   <span class="stat">Pol: <span id="activeGov">—</span></span>
   <span class="stat">Pop: <span id="activePop">—</span></span>
-  <span class="stat">Money: <span id="activeMoney">—</span></span>
+  <span class="stat">Cash: <span id="activeMoney">—</span></span>
 </div>
 
 <div class="tables" id="tables"></div>
 
 <h3>Карта галактики / система</h3>
-<div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+<div class="map-row">
   <canvas id="map" width="800" height="560" style="border:1px solid #444; background:#111;"></canvas>
   <div>
     <canvas id="sector" width="460" height="460" style="border:1px solid #444; background:#111;"></canvas>
@@ -241,8 +259,9 @@ function renderTables() {
         <button data-slot="${slot}" data-dir="-1">&lt;</button>
         <input class="pinput" data-slot="${slot}" type="number" min="0" value="${id}">
         <button data-slot="${slot}" data-dir="1">&gt;</button>
-        <span class="ptype">${info}</span>
       </div>
+      <div class="ptype">${info}</div>
+      <table>
       <table>
         <thead><tr>
           <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th><th>delta</th>
@@ -357,7 +376,7 @@ document.getElementById("toggle").addEventListener("click", () => {
 document.getElementById("chatBtn").addEventListener("click", () => {
   const id = planets[active];
   const url = "/chat?planet=" + encodeURIComponent(id);
-  window.open(url, "gs-chat", "width=1000,height=760");
+  window.open(url, "gs-chat", "width=1280,height=760");
 });
 
 // ---------- Карта галактики (1+4: convex hull + цвет) ----------
@@ -647,9 +666,12 @@ function drawSector(sys, selectedID, day) {
 document.getElementById("sector").addEventListener("click", (e) => {
   if (!sectorSys) return;
   
-  const rect = e.target.getBoundingClientRect();
-  const clickX = e.clientX - rect.left;
-  const clickY = e.clientY - rect.top;
+  const canvas = e.target;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const clickX = (e.clientX - rect.left) * scaleX;
+  const clickY = (e.clientY - rect.top) * scaleY;
 
   // Мировые координаты
   const wx = (clickX - lastDrawCX) / lastDrawScale;
@@ -691,8 +713,10 @@ document.getElementById("sector").addEventListener("click", (e) => {
 document.getElementById("map").addEventListener("click", (e) => {
   const canvas = e.target;
   const rect = canvas.getBoundingClientRect();
-  const clickX = e.clientX - rect.left;
-  const clickY = e.clientY - rect.top;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const clickX = (e.clientX - rect.left) * scaleX;
+  const clickY = (e.clientY - rect.top) * scaleY;
 
   const S = 2;
   let clicked = null;
@@ -827,11 +851,15 @@ async function stationTrade(sector, good, op) {
   const qty = parseInt(q);
   if (isNaN(qty) || qty <= 0) return;
   try {
-    await fetch("/station/trade", {
+    const r = await fetch("/station/trade", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sector, good, qty, op })
     });
+    if (!r.ok) {
+      alert("сделка отклонена: " + r.status);
+      return;
+    }
   } catch (e) { console.error(e); }
 }
 

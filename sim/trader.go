@@ -311,7 +311,7 @@ func (w *World) SpawnTrader(planetID int, g Good) *Trader {
 		Phase:      TraderPhaseCheckLocal,
 		Good:       g,
 		Cargo:      0,
-		CargoMax:   techLevel * 100,
+		CargoMax:   techLevel * 10,
 		Money:      5000.0,
 		Fuel:       15.0,
 		FuelMax:    15.0,
@@ -416,7 +416,7 @@ func (w *World) phaseTraders() {
 					w.Planets[t.FromPlanet].Money += cost * 0.01 // 1% апгрейда — планете, где отдыхаем
 					t.TechLevel++
 					t.Speed = 0.2 + t.SpeedRng*(float64(t.TechLevel)/10.0)
-					t.CargoMax = t.TechLevel * 100
+					t.CargoMax = t.TechLevel * 10
 				}
 			}
 			t.Progress++

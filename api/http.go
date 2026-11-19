@@ -43,7 +43,20 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/mmo/command", s.handleMMOCommand)
 	mux.HandleFunc("/mmo/spawn", s.handleMMOSpawn)
 	mux.HandleFunc("/mmo/despawn", s.handleMMODespawn)
+	mux.HandleFunc("/mmo/ships", s.handleMMOShips)
 	mux.HandleFunc("/", s.handleIndex)
+}
+
+type MMOShipBriefJSON struct {
+	ShipID      int      `json:"shipId"`
+	PlayerID    int      `json:"playerId"`
+	Pos         sim.Vec2 `json:"pos"`
+	Docked      bool     `json:"docked"`
+	DockID      int      `json:"dockId"`
+	OrbitPlanet int      `json:"orbitPlanet"`
+	OrbitRadius float64  `json:"orbitRadius"`
+	ETA         int      `json:"eta"`
+	Kind        int      `json:"kind"`
 }
 
 type MMOStateJSON struct {
@@ -58,6 +71,8 @@ type MMOStateJSON struct {
 	OrbitRadius float64  `json:"orbitRadius"`
 	ETA         int      `json:"eta"`
 	Kind        int      `json:"kind"`
+	Target      *sim.Vec2 `json:"target,omitempty"`
+	Start       *sim.Vec2 `json:"start,omitempty"`
 }
 
 type MMOCommandJSON struct {
@@ -118,6 +133,35 @@ type LairJSON struct {
 	Cargo     []int   `json:"cargo"` // порядок GoodsTextOrder
 }
 
+func (s *Server) handleMMOShips(w http.ResponseWriter, r *http.Request) {
+	sysStr := r.URL.Query().Get("system")
+	sysID, err := strconv.Atoi(sysStr)
+	if err != nil {
+		http.Error(w, "bad system id", http.StatusBadRequest)
+		return
+	}
+	s.World.Ships.Mu.Lock()
+	out := make([]MMOShipBriefJSON, 0, len(s.World.Ships.Ships))
+	for _, sh := range s.World.Ships.Ships {
+		if sh.SystemID != sysID {
+			continue
+		}
+		b := MMOShipBriefJSON{
+			ShipID: sh.ID, PlayerID: sh.PlayerID, Pos: sh.Pos,
+			Docked: sh.Docked, DockID: sh.DockID,
+			OrbitPlanet: sh.OrbitPlanet, OrbitRadius: sh.OrbitRadius,
+		}
+		if sh.Target != nil {
+			b.ETA = sh.Target.ETA
+			b.Kind = int(sh.Target.Kind) + 1
+		}
+		out = append(out, b)
+	}
+	s.World.Ships.Mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 func (s *Server) handleMMOState(w http.ResponseWriter, r *http.Request) {
 	shipIDStr := r.URL.Query().Get("ship")
 	shipID, err := strconv.Atoi(shipIDStr)
@@ -138,6 +182,10 @@ func (s *Server) handleMMOState(w http.ResponseWriter, r *http.Request) {
 	if sh.Target != nil {
 		out.ETA = sh.Target.ETA
 		out.Kind = int(sh.Target.Kind) + 1
+		t := sh.Target.Target
+		out.Target = &t
+		st := sh.Target.Start
+		out.Start = &st
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -163,14 +211,18 @@ func (s *Server) handleMMOCommand(w http.ResponseWriter, r *http.Request) {
 		Kind: sim.MoveKind(req.Kind), Planet: req.Planet,
 		Radius: req.Radius, Target: req.Target,
 	}
-	sh, ok := s.World.Ships.ApplyCommand(cmd)
+	sh, ok := s.World.Ships.ApplyCommand(s.World, cmd)
 	if !ok {
 		http.Error(w, "ship not found", http.StatusNotFound)
 		return
 	}
+	eta := 0
+	if sh.Target != nil {
+		eta = sh.Target.ETA
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok": true, "shipId": sh.ID, "eta": sh.Target.ETA,
+		"ok": true, "shipId": sh.ID, "eta": eta,
 	})
 }
 
@@ -338,8 +390,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		http.Error(w, "bad ms", http.StatusBadRequest)
+	if err != nil || n < 0 || n > 100000 {
+		http.Error(w, "bad ms (0=auto, 1..100000)", http.StatusBadRequest)
 		return
 	}
 	s.World.TickOverrideMs = n
@@ -604,6 +656,7 @@ func (s *Server) handleStation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	st.Mu.Lock()
 	out := make([]StationGoodJSON, 0, sim.PlayerGoodCount)
 	for pg := 0; pg < int(sim.PlayerGoodCount); pg++ {
 		buy, sell := s.World.StationPrice(sim.PlayerGood(pg), pm[pg].Count, stock[pg])
@@ -616,6 +669,7 @@ func (s *Server) handleStation(w http.ResponseWriter, r *http.Request) {
 			Balance: st.Balance[pg],
 		})
 	}
+	st.Mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -637,7 +691,7 @@ func (s *Server) handleStationTrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Sector < 0 || req.Sector >= sim.SectorCount ||
 		req.Good < 0 || req.Good >= int(sim.PlayerGoodCount) ||
-		req.Qty <= 0 {
+		req.Qty < 1 || req.Qty > 10000 {
 		http.Error(w, "bad params", http.StatusBadRequest)
 		return
 	}
@@ -646,17 +700,21 @@ func (s *Server) handleStationTrade(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "station not found", http.StatusNotFound)
 		return
 	}
+	st.Mu.Lock()
 	switch req.Op {
 	case "buy":
 		st.Balance[req.Good] -= req.Qty // игрок купил → станция должна
 	case "sell":
 		st.Balance[req.Good] += req.Qty // игрок продал → планеты должны станции
 	default:
+		st.Mu.Unlock()
 		http.Error(w, "bad op", http.StatusBadRequest)
 		return
 	}
+	bal := st.Balance[req.Good]
+	st.Mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]int{"balance": st.Balance[req.Good]})
+	_ = json.NewEncoder(w).Encode(map[string]int{"balance": bal})
 }
 
 func (s *Server) handlePlanet(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,7 @@ const (
 	MoveGoto                  // лететь в точку
 	MoveEdge                  // лететь к краю системы
 	MoveDock                  // стыковка
+	MoveUndock                 // 4 — снять док, встать в точку планеты
 )
 
 // MoveOrder — приказ на перемещение. Сервер исполняет по ходам.
@@ -34,6 +35,7 @@ type MoveOrder struct {
 	Planet int
 	Radius float64
 	ETA    int // сколько ходов осталось (0 = прибыл)
+	Start  Vec2 // точка старта (для отрисовки пути)
 }
 
 // ShipCommand — что клиент шлёт. Один ход = одна команда.

@@ -198,3 +198,20 @@ func (w *World) techDiscountPirates(currentTL int) float64 {
 		return -frac
 	}
 }
+
+// pirateLairDecay — ежедневный полураспад товаров на логове пиратов.
+// Ненулевой запас: c<2 → 0, c>=2 → c/2. Ноль — пропускаем (не трогаем).
+func (w *World) pirateLairDecay(p *Planet) {
+	for g := 0; g < int(GoodCount); g++ {
+		c := p.Market[g].Count
+		if c <= 0 {
+			continue
+		}
+		if c < 2 {
+			c = 0
+		} else {
+			c /= 2
+		}
+		p.Market[g].Count = c
+	}
+}

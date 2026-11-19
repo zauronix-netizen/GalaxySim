@@ -2,6 +2,7 @@ package sim
 
 import (
 	"math"
+	"sync"
 )
 
 // PlayerGood — 8 «игровых» товаров (старая база). Отдельный тип,
@@ -137,9 +138,11 @@ var OldGoodsMarket = [PlayerGoodCount]OldGoodInfo{
 // Station — станция сектора. Своего Count нет: количество берётся из сима
 // (PlayerMarket, 8). Balance — долг: <0 станция должна планетам сектора,
 // >0 планеты должны станции. Алгоритм-телепорт пока не подключён.
+
 type Station struct {
 	Sector  int
 	Balance [PlayerGoodCount]int
+	Mu      sync.Mutex
 }
 
 // StationPrice — цена станции сектора от общего стока (сумма TargetStock
@@ -186,6 +189,7 @@ func (w *World) phaseStations() {
 		if st == nil {
 			continue
 		}
+		st.Mu.Lock()
 		for pg := 0; pg < int(PlayerGoodCount); pg++ {
 			bal := st.Balance[pg]
 			if bal == 0 {
@@ -267,6 +271,7 @@ func (w *World) phaseStations() {
 				st.Balance[pg] = -need
 			}
 		}
+		st.Mu.Unlock()
 	}
 }
 

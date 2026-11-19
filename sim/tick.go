@@ -21,6 +21,8 @@ func (w *World) SimTick() {
 	}
 }
 
+
+// MMOReady == false (Tick == 100ms == 1day)
 func (w *World) SimTickFast() {
 	w.Events = w.Events[:0]
 	w.TickEvents = w.TickEvents[:0]
@@ -70,13 +72,7 @@ func (w *World) SimTickFast() {
 			w.SpawnBanker(p.ID, race)
 			w.BankersByRace[r]++
 		}
-	}
 
-	// Повторный спавн трейдеров.
-	if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
 		for _, star := range w.Stars {
 			planets := w.PlanetMap[star.ID]
 			if len(planets) > 3 && planets[3].Habitable {
@@ -85,7 +81,9 @@ func (w *World) SimTickFast() {
 		}
 	}
 
-	// Волны караванов.
+	// ... (караваны/пираты/лайнеры/дипломаты — как было)
+
+	// Волны караванов: +0.5, +1.5, +2.5, +3.5, +4.5 года от прогрева.
 	for i := 0; i < CaravanWaves; i++ {
 		waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
 		if w.Day == waveDay {
@@ -97,8 +95,12 @@ func (w *World) SimTickFast() {
 	if len(w.News) > MaxNews {
 		w.News = w.News[len(w.News)-MaxNews:]
 	}
+	
 }
 
+
+
+// MMOReady == true. no players (Tick == 10ms; Day == 32 tick)
 func (w *World) SimTickSuperFast() {
 	oldHour := w.Hour
 
@@ -160,23 +162,11 @@ func (w *World) SimTickSuperFast() {
 				w.SpawnBanker(p.ID, race)
 				w.BankersByRace[r]++
 			}
-		}
-		if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
-			w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
-			w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
-			w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
 			for _, star := range w.Stars {
 				planets := w.PlanetMap[star.ID]
 				if len(planets) > 3 && planets[3].Habitable {
 					w.SpawnTrader(planets[3].ID, GoodFood)
 				}
-			}
-		}
-		for i := 0; i < CaravanWaves; i++ {
-			waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
-			if w.Day == waveDay {
-				w.SpawnCaravanWave()
-				break
 			}
 		}
 		if len(w.News) > MaxNews {
@@ -250,29 +240,13 @@ func (w *World) SimTickSlow() {
 			w.SpawnBanker(p.ID, race)
 			w.BankersByRace[r]++
 		}
-	}
-
-	// Повторный спавн трейдеров.
-	if w.Day == GalaxyWarmupTurns+1*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+2*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+3*TurnsPerYear ||
-		w.Day == GalaxyWarmupTurns+4*TurnsPerYear {
 		for _, star := range w.Stars {
 			planets := w.PlanetMap[star.ID]
 			if len(planets) > 3 && planets[3].Habitable {
 				w.SpawnTrader(planets[3].ID, GoodFood)
 			}
 		}
-	}
-
-	// Волны караванов.
-	for i := 0; i < CaravanWaves; i++ {
-		waveDay := GalaxyWarmupTurns + i*TurnsPerYear + TurnsPerYear/2
-		if w.Day == waveDay {
-			w.SpawnCaravanWave()
-			break
-		}
-	}
+	}	
 
 	if len(w.News) > MaxNews {
 		w.News = w.News[len(w.News)-MaxNews:]
@@ -928,6 +902,25 @@ func (w *World) phaseUnload(c *Caravan) {
 
 */
 
+// planCaravanWave — по GTL++ планируем доп. волну через полгода, пока не исчерпан лимит.
+func (w *World) planCaravanWave() {
+	if w.GalaxyTechLevel > w.LastGTL {
+		w.LastGTL = w.GalaxyTechLevel
+		if w.CaravanWavesSpawned < CaravanWaves {
+			w.NextCaravanWaveDay = w.Day + TurnsPerYear/2
+			w.CaravanWavesSpawned++
+		}
+	}
+}
+
+// checkCaravanWave — ежедневная проверка: пора ли выпустить запланированную волну.
+func (w *World) checkCaravanWave() {
+	if w.NextCaravanWaveDay != 0 && w.Day == w.NextCaravanWaveDay {
+		w.SpawnCaravanWave()
+		w.NextCaravanWaveDay = 0
+	}
+}
+
 func (w *World) phaseSpawn() {
 	for i := 0; i < 10 && len(w.Caravans) < targetCaravans; i++ {
 		if w.SpawnCaravan() == nil {
@@ -1027,6 +1020,13 @@ func (w *World) phaseEconomy() {
 		}
 		for g := 0; g < int(GoodCount); g++ {
 			w.UpdateMarketState(p, Good(g))
+		}
+	}
+	// Логова пиратов: ежедневный полураспад товаров (отдельный проход —
+	// RandomPlanetOrder содержит только обитаемые).
+	for _, p := range w.Planets {
+		if p.IsPirateLair() {
+			w.pirateLairDecay(p)
 		}
 	}
 	statEcon += time.Since(tEcon)
