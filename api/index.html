@@ -51,6 +51,27 @@
   .ptable { flex: 1 1 0; min-width: 300px; }
   th, td { padding: 2px 5px; font-size: 1.0em; }
   
+  /* --- Скролл таблиц: 12 строк видно, остальное в скролле, thead закреплён --- */
+  /* Обёртка .tblscroll вокруг <table> — table-layout не ломается, thead прилипает. */
+  .tblscroll {
+    max-height: 344px;        /* 16 строк × 20px + thead 24px — player market (8) без скролла */
+    overflow-y: auto;
+  }
+  .tblscroll thead th {
+    position: sticky;
+    top: 0;
+    background: #2a2a2a;
+    z-index: 1;
+  }
+  /* Sector market (38) — 35% ширины, player market (8) — 50% */
+  #sectorMarketWrap > div:first-child { flex: 0 0 35%; min-width: 0; }
+  #sectorMarketWrap > div:nth-child(2) { flex: 0 0 50%; min-width: 0; }
+  /* Скроллбар — тонкий, тёмный */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #1e1e1e; }
+  ::-webkit-scrollbar-thumb { background: #444; border: 1px solid #555; }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+  
 </style>
 </head>
 <body>
@@ -88,21 +109,21 @@
 <div id="sectorMarketWrap" style="margin-top:8px; display:none; gap:16px; align-items:flex-start;">
   <div>
     <div class="ptype" style="color:#8cf; margin-bottom:4px;">sector market (38)</div>
-    <table>
+    <div class="tblscroll"><table>
       <thead><tr>
         <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th>
       </tr></thead>
       <tbody id="sectorMarketBody"></tbody>
-    </table>
+    </table></div>
   </div>
   <div>
     <div class="ptype" style="color:#8cf; margin-bottom:4px;">player market (8)</div>
-    <table>
+    <div class="tblscroll"><table>
       <thead><tr>
         <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th><th>balance</th><th>trade</th>
       </tr></thead>
       <tbody id="playerMarketBody"></tbody>
-    </table>
+    </table></div>
   </div>
 </div>
 
@@ -261,13 +282,12 @@ function renderTables() {
         <button data-slot="${slot}" data-dir="1">&gt;</button>
       </div>
       <div class="ptype">${info}</div>
-      <table>
-      <table>
+      <div class="tblscroll"><table>
         <thead><tr>
           <th>good</th><th>buy</th><th>sell</th><th>count</th><th>stock</th><th>delta</th>
         </tr></thead>
         <tbody></tbody>
-      </table>`;
+      </table></div>`;
     const tb = div.querySelector("tbody");
     if (p) {
       for (const m of p.market) {

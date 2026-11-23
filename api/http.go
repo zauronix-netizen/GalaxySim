@@ -44,6 +44,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/mmo/spawn", s.handleMMOSpawn)
 	mux.HandleFunc("/mmo/despawn", s.handleMMODespawn)
 	mux.HandleFunc("/mmo/ships", s.handleMMOShips)
+	mux.HandleFunc("/mmo/systemobj", s.handleSystemObjects)
 	mux.HandleFunc("/", s.handleIndex)
 }
 
@@ -160,6 +161,22 @@ func (s *Server) handleMMOShips(w http.ResponseWriter, r *http.Request) {
 	s.World.Ships.Mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleSystemObjects — корабли в системе для карты чата: позиция + цель.
+// Планеты и звезду карта знает из /system, здесь только движущиеся корабли.
+func (s *Server) handleSystemObjects(w http.ResponseWriter, r *http.Request) {
+	sysID, err := strconv.Atoi(r.URL.Query().Get("system"))
+	if err != nil {
+		http.Error(w, "bad system id", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"day":   s.World.Day,
+		"star":  sysID,
+		"ships": s.World.MapShips(sysID),
+	})
 }
 
 func (s *Server) handleMMOState(w http.ResponseWriter, r *http.Request) {

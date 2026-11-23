@@ -108,7 +108,7 @@ func (w *World) caravanIsDeficit(p *Planet, g Good) bool {
 // Возвращает (good, true) если нашли, иначе (0, false).
 func (w *World) caravanCheckLocalSurplus(c *Caravan) (Good, bool) {
 	p := w.Planets[c.FromPlanet]
-	order := w.Rng.Perm(int(GoodCount))
+	order := w.npcGoodOrder()
 	for _, gi := range order {
 		g := Good(gi)
 		if !w.CanTrade(p, c.Race) {
@@ -147,6 +147,9 @@ func (w *World) caravanFindSurplusNearby(c *Caravan) (*Planet, Good) {
 		}
 		for g := 0; g < int(GoodCount); g++ {
 			gg := Good(g)
+			if !goodTraded(gg) {
+				continue // NPC не работает с неторгуемыми товарами
+			}
 			if !w.IsLegal(p, gg) {
 				continue
 			}

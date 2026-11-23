@@ -584,8 +584,9 @@ func (w *World) traderCheckLocal(t *Trader) {
 
 	p := w.Planets[t.FromPlanet]
 
-	// Случайный порядок товаров — чтобы трейдеры не сбивались на первый
-	order := w.Rng.Perm(int(GoodCount))
+	// Случайный порядок товаров — чтобы трейдеры не сбивались на первый.
+	// Только торгуемые NPC (GoodTradedByNPC).
+	order := w.npcGoodOrder()
 
 	// 1. Ищем избыток на ТЕКУЩЕЙ планете (по случайному порядку товаров)
 	for _, gi := range order {
@@ -733,6 +734,9 @@ func (w *World) traderPirateLoad(t *Trader) {
 
 	var goods []Good
 	for g := 0; g < int(GoodCount); g++ {
+		if !goodTraded(Good(g)) {
+			continue // неторгуемые NPC товары не берём даже на логове
+		}
 		if p.Market[g].Count > 0 {
 			goods = append(goods, Good(g))
 		}
@@ -976,13 +980,17 @@ func (w *World) traderFindTrip(t *Trader) {
 }
 
 func (w *World) traderFindTripPlus(t *Trader) {
-	randomGood := Good(w.Rng.Intn(int(GoodCount)))
+	// Первый — случайный из торгуемых NPC (GoodTradedByNPC), остальные — перебором.
+	randomGood := w.randomNpcGood()
 	if w.traderTryFindSurplus(t, randomGood) {
 		return
 	}
 	
 	for g := 0; g < int(GoodCount); g++ {
 		if Good(g) == randomGood {
+			continue
+		}
+		if !goodTraded(Good(g)) {
 			continue
 		}
 		if w.traderTryFindSurplus(t, Good(g)) {

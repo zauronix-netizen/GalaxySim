@@ -217,6 +217,7 @@ type World struct {
 	Chat *ChatStore
 	Shm      *SharedMem // разделяемая память для viewer.exe (nil — выключено)
 	ViewStar int        // какая звезда пишется в снимок (для viewer)
+	ShmDay   int        // день последней записи в шард (раз в день = 2048 тиков)
 
 	Rel     Relations
 	BaseRel Relations
