@@ -69,7 +69,7 @@ func (w *World) checkGoodsCounters(p *Planet) {
 			if mult < 1 {
 				mult = 1
 			}
-			cost := totalCost[p.TechLevel] * (w.techDiscountPlanets(p.TechLevel) + 1) * PlanetCostMult * mult
+			cost := TotalTL(p.TechLevel, 5000) * (w.techDiscountPlanetsSmooth(p.TechLevel) + 1) * PlanetCostMult * mult
 			if p.Money >= cost + p.MoneyRef {
 				p.Money -= cost
 				p.TechLevel++

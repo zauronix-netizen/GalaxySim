@@ -99,6 +99,8 @@ func (w *World) pirateAttackPhase(p *Pirate) {
 	roll := w.Rng.Intn(100)
 	switch {
 	case roll < 10: // убил
+		// История каравана: убит пиратами.
+		w.caravanAddHistory(target, target.FromPlanet, target.ToPlanet, target.Good, 0, 0, false, "pirate")
 		target.Alive = false
 		w.DeathsPirate++
 		w.Planets[p.BasePlanet].Money += target.Money // деньги убитого — логову
@@ -110,17 +112,24 @@ func (w *World) pirateAttackPhase(p *Pirate) {
 		w.Planets[p.BasePlanet].Market[target.Good].Count += loot // груз — логову
 		w.LootedCargo++                                           // счётчик ограблений
 		target.Looted = true
+		// История каравана: ограблен пиратами.
+		w.caravanAddHistory(target, target.FromPlanet, target.ToPlanet, target.Good, 0, 0, false, "pirate")
 		p.Wins++
 	default: // отстал
 	}
+
 	// Пересчёт TL и скорости (после switch, перед Return).
 
 	lair := w.Planets[p.BasePlanet]
 	if p.TechLevel < 15 {
-		upcost := totalCost[p.TechLevel] * (w.techDiscountPirates(p.TechLevel) + 1)
+		upcost := TotalTL(p.TechLevel, 5000) * (w.techDiscountAgents(p.TechLevel) + 1)
 		if lair.Money >= upcost {
 			lair.Money -= upcost
 			p.TechLevel = pirateTechLevel(p.Wins)
+			// Потолок: не выше GTL+3. Перескочил — откат к GTL-2.
+			if w.GalaxyTechLevel > 0 && p.TechLevel > w.GalaxyTechLevel+3 {
+				p.TechLevel = w.GalaxyTechLevel-2
+			}
 			p.Speed = 0.3 + p.SpeedRng*(float64(p.TechLevel)/10.0)
 		}
 	}

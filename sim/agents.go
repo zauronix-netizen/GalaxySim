@@ -1,5 +1,19 @@
 package sim
 
+const CaravanHistorySize = 1500
+
+// CaravanHistoryEntry — одна запись в записной книжке каравана.
+type CaravanHistoryEntry struct {
+	SourceID      int     // планета-источник
+	DestinationID int     // планета-приёмник
+	Good          Good    // товар
+	BuyPrice      float64 // цена покупки (при загрузке)
+	SellPrice     float64 // цена продажи (при разгрузке)
+	FineTrade     bool    // успех сделки
+	Reason        string  // причина неудачи: "pirate" | "price" | "no_money" | "no_goods" | "other"
+	Day           int     // день записи
+}
+
 type Caravan struct {
 	ID         int
 	Race       Race
@@ -17,6 +31,7 @@ type Caravan struct {
 	CargoMax   int
 	TechLevel  int
 	BaseCost   float64
+	buyPrice   float64
 	Money      float64
 	Fuel       float64
 	FuelMax    float64
@@ -24,7 +39,17 @@ type Caravan struct {
 	Flight     FlightPath
 	AfterRefuel int
 	Alive      bool
+	LastTarget   int   // ID последней планеты продажи
+	LastTargetAt int // тик момента выбора цели
+
+	// История рейсов (кольцевой буфер).
+	History     [CaravanHistorySize]CaravanHistoryEntry
+	HistoryHead int
+	HistoryLen  int
 }
+
+const CaravanMemoryTicks = 2 * 2048 // подставьте свои тиков в игровой день
+
 
 type Pirate struct {
 	ID         int
@@ -95,8 +120,8 @@ const (
 	targetPirates   = 0
 	targetLiners    = 0
 	targetDiplomats = 0
-	CaravanCargo    = 100
-	CaravanMoney    = 0.0
+	CaravanCargo    = 0
+	CaravanMoney    = 0
 	CaravanFuelMax  = 5.0
 	CaravanWaves    = 5 // количество волн спавна караванов (по 420 за волну)
 )
@@ -137,7 +162,35 @@ const (
     DiplomatPhaseEdgeToPlanet
 )
 
+// techDiscountAgents — плавная наценка/скидка к стоимости апгрейда TechLevel.
+// Положительное — наценка (агент выше среднего), отрицательное — скидка.
+// currentTL == -1 → служебный вызов, вернуть средний TL (как в старой функции).
+// currentTL == 0 или трейдеров нет → 0 (нет базы для сравнения).
+func (w *World) techDiscountAgents(currentTL int) float64 {
+	if len(w.Traders) == 0 || currentTL == 0 {
+		return 0
+	}
 
+	sum := 0
+	for _, t := range w.Traders {
+		sum += t.TechLevel
+	}
+	avg := float64(sum) / float64(len(w.Traders))
+
+	// Служебный вызов: спросили средний TL, а не скидку.
+	if currentTL == -1 {
+		return avg
+	}
+
+	d := (float64(currentTL) - avg) * 0.35 // плавная шкала вместо ступенек
+	if d > 0.7 {
+		d = 0.7
+	}
+	if d < -0.7 {
+		d = -0.7
+	}
+	return d
+}
 
 var nextCaravanID, nextPirateID, nextLinerID, nextDiplomatID int
 

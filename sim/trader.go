@@ -32,6 +32,19 @@ type FlightPath struct {
 	Len    float64 // Длина кривой (20 отрезков)
 }
 
+const TraderHistorySize = 1500
+
+// TraderHistoryEntry — одна запись в записной книжке трейдера.
+type TraderHistoryEntry struct {
+	SourceID      int     // планета-источник
+	DestinationID int     // планета-приёмник
+	Good          Good    // товар
+	Price         float64 // цена покупки/продажи за единицу
+	FineTrade     bool    // успех сделки
+	Reason        string  // "pirate" | "price" | "no_money" | "no_goods" | "no_cargo" | "no_event" | ""
+	Day           int     // день записи
+}
+
 type Trader struct {
 	ID             int
 	Race           Race
@@ -66,6 +79,11 @@ type Trader struct {
 	DebugLog  bool
 	LastPhase int
 	AfterRefuel int // фаза после RefuelTakeoff (PlanetToEdge / EdgeToPlanet)
+
+	// История сделок (кольцевой буфер).
+	History     [TraderHistorySize]TraderHistoryEntry
+	HistoryHead int
+	HistoryLen  int
 }
 
 var currentGalaxyTechLevel int = 3
@@ -285,6 +303,52 @@ func (w *World) techDiscountPlanets(currentTL int) float64 {
 	}
 }
 
+// techDiscountPlanetsSmooth — плавная база (тяга к среднему) плюс GTU
+// как жёсткие рельсы: чем дальше планета от GTL, тем сильнее штраф/скидка.
+// Старую techDiscountPlanets не трогаем (мёртвый путь).
+func (w *World) techDiscountPlanetsSmooth(currentTL int) float64 {
+	sum, count := 0, 0
+	for _, p := range w.Planets {
+		if p.Habitable {
+			sum += p.TechLevel
+			count++
+		}
+	}
+	if count == 0 || currentTL == 0 {
+		return 0
+	}
+
+	avg := float64(sum) / float64(count)
+
+	if currentTL == -1 {
+		return avg
+	}
+
+	// Плавная база — тяга к среднему.
+	d := (float64(currentTL) - avg) * 0.35
+	if d > 0.7 {
+		d = 0.7
+	}
+	if d < -0.7 {
+		d = -0.7
+	}
+
+	// GTU — жёсткие рельсы: не даём всей толпе уехать от GTL.
+	gtu := w.GalaxyTechLevel
+	if gtu > 0 {
+		gapGtu := float64(currentTL - gtu)
+		if gapGtu > 3 {
+			d += (gapGtu - 3) * 0.3
+		} else if gapGtu < -3 {
+			d += (gapGtu + 3) * 0.3
+			if d < -0.9 {
+				d = -0.9
+			}
+		}
+	}
+	return d
+}
+
 func init() {
 	log.SetFlags(0)
 	f, err := os.OpenFile("traders.log", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
@@ -299,7 +363,29 @@ func init() {
 func (w *World) SpawnTrader(planetID int, g Good) *Trader {
 	p := w.Planets[planetID]
 	nextTraderID++
-	techLevel := 3
+	
+	// TL спавна — случайно между TL планеты и GTL, включая границы.
+	// Старт: планеты 2, GTL 3 → трейдеры на 2 или 3.
+	// Дальше диапазон ползёт вверх вместе с планетарным TL и GTL.
+	gtl := w.GalaxyTechLevel
+	if gtl < 2 {
+		gtl = 3 // fallback на warmup / аномалии (раньше было хардкодом 3)
+	}
+	tlLo, tlHi := p.TechLevel, gtl
+	if tlLo > tlHi {
+		tlLo, tlHi = tlHi, tlLo
+	}
+	if tlLo < 1 {
+		tlLo = 1
+	}
+	if tlHi > 15 {
+		tlHi = 15
+	}
+	techLevel := tlLo
+	if tlHi > tlLo {
+		techLevel = tlLo + w.Rng.Intn(tlHi-tlLo+1)
+	}
+	
 	rngSpeed := w.Rng.Float64()
 	t := &Trader{
 		ID:         nextTraderID,
@@ -410,7 +496,7 @@ func (w *World) phaseTraders() {
 
 		case TraderPhaseRest:
 			if t.TechLevel < 15 {
-				cost := totalCost[t.TechLevel] * (w.techDiscountTraders(t.TechLevel) + 1)
+				cost := TotalTL(t.TechLevel, 5000) * (w.techDiscountAgents(t.TechLevel) + 1)
 				if t.Money >= cost + 5000 {
 					t.Money -= cost
 					w.Planets[t.FromPlanet].Money += cost * 0.01 // 1% апгрейда — планете, где отдыхаем
@@ -584,8 +670,9 @@ func (w *World) traderCheckLocal(t *Trader) {
 
 	p := w.Planets[t.FromPlanet]
 
-	// Случайный порядок товаров — чтобы трейдеры не сбивались на первый
-	order := w.Rng.Perm(int(GoodCount))
+	// Случайный порядок товаров — чтобы трейдеры не сбивались на первый.
+	// Только торгуемые NPC (GoodTradedByNPC).
+	order := w.npcGoodOrder()
 
 	// 1. Ищем избыток на ТЕКУЩЕЙ планете (по случайному порядку товаров)
 	for _, gi := range order {
@@ -733,6 +820,9 @@ func (w *World) traderPirateLoad(t *Trader) {
 
 	var goods []Good
 	for g := 0; g < int(GoodCount); g++ {
+		if !goodTraded(Good(g)) {
+			continue // неторгуемые NPC товары не берём даже на логове
+		}
 		if p.Market[g].Count > 0 {
 			goods = append(goods, Good(g))
 		}
@@ -976,13 +1066,17 @@ func (w *World) traderFindTrip(t *Trader) {
 }
 
 func (w *World) traderFindTripPlus(t *Trader) {
-	randomGood := Good(w.Rng.Intn(int(GoodCount)))
+	// Первый — случайный из торгуемых NPC (GoodTradedByNPC), остальные — перебором.
+	randomGood := w.randomNpcGood()
 	if w.traderTryFindSurplus(t, randomGood) {
 		return
 	}
 	
 	for g := 0; g < int(GoodCount); g++ {
 		if Good(g) == randomGood {
+			continue
+		}
+		if !goodTraded(Good(g)) {
 			continue
 		}
 		if w.traderTryFindSurplus(t, Good(g)) {
@@ -1091,13 +1185,16 @@ func (w *World) traderLoad(t *Trader) {
 	// планета получает деньги за товар (из воздуха)
 	p.Money += float64(count) * ShopGoodsPurchasePrice(p, t.Good) * 0.01
 
+	// История: загрузка (бесплатно для трейдера, цена покупки планеты).
+	w.traderAddHistory(t, t.FromPlanet, t.ToPlanet, t.Good, ShopGoodsPurchasePrice(p, t.Good), true, "")
+
 	// TechLevel++ за деньги (как у трейдера)
 	if p.TechLevel < w.GalaxyTechLevel+3 && p.TechLevel < 15 {
 		mult := 1.0 + float64(p.TechLevel-w.GalaxyTechLevel)
 			if mult < 1 {
 				mult = 1
 			}
-		cost := totalCost[p.TechLevel] * (w.techDiscountPlanets(p.TechLevel) + 1) * PlanetCostMult * mult
+		cost := TotalTL(p.TechLevel, 5000) * (w.techDiscountPlanetsSmooth(p.TechLevel) + 1) * PlanetCostMult * mult
 		if p.Money >= cost + p.MoneyRef {
 			p.Money -= cost
 			p.TechLevel++
@@ -1151,9 +1248,33 @@ func (w *World) traderUnload(t *Trader) {
 		salary := float64(t.Cargo) * ShopGoodsSellPrice(p, t.Good) * salaryRate
 		t.Money += salary
 		t.Cargo = 0
+
+		// История: выгрузка, цена продажи.
+		w.traderAddHistory(t, t.FromPlanet, t.ToPlanet, t.Good, ShopGoodsSellPrice(p, t.Good), true, "")
+	} else {
+		// История: прилетел, но груза нет.
+		w.traderAddHistory(t, t.FromPlanet, t.ToPlanet, t.Good, 0, false, "no_cargo")
 	}
 	t.Phase = TraderPhaseRest
 	t.Progress = 0
+}
+
+// traderAddHistory — добавить запись в историю трейдера (кольцевой буфер).
+func (w *World) traderAddHistory(t *Trader, sourceID, destID int, g Good, price float64, fine bool, reason string) {
+	idx := t.HistoryHead
+	t.History[idx] = TraderHistoryEntry{
+		SourceID:      sourceID,
+		DestinationID: destID,
+		Good:          g,
+		Price:         price,
+		FineTrade:     fine,
+		Reason:        reason,
+		Day:           w.Day,
+	}
+	t.HistoryHead = (t.HistoryHead + 1) % TraderHistorySize
+	if t.HistoryLen < TraderHistorySize {
+		t.HistoryLen++
+	}
 }
 
 func PriceGradeByRatio(purchasePrice, basePrice int) int {

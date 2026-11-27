@@ -42,7 +42,7 @@ func (w *World) SimTickFast() {
 	if !InflationOff && w.Day > 0 && w.Day%TurnsPerYear == 0 {
 		w.ComputeGlobalGoodsPriceBands()
 	}
-	if w.Day > 0 && w.Day%TurnsPerYear == 0 {
+	if w.Day > 0 && w.Day%(TurnsPerYear/4) == 0 {
 		w.computeGalaxyTechLevel()
 	}
 
@@ -136,7 +136,7 @@ func (w *World) SimTickSuperFast() {
 		w.LogTickEvents()
 		w.phaseRelations()
 
-		if w.Day > 0 && w.Day%TurnsPerYear == 0 {
+		if w.Day > 0 && w.Day%(TurnsPerYear/4) == 0 {
 			if !InflationOff {
 				w.ComputeGlobalGoodsPriceBands()
 			}
@@ -212,7 +212,7 @@ func (w *World) SimTickSlow() {
 	w.phaseRelations()
 
 	// Годовые.
-	if w.Day > 0 && w.Day%TurnsPerYear == 0 {
+	if w.Day > 0 && w.Day%(TurnsPerYear/4) == 0 {
 		if !InflationOff {
 			w.ComputeGlobalGoodsPriceBands()
 		}
@@ -369,7 +369,13 @@ func (w *World) phaseMovement() {
 			case PhaseUnload:
 				w.caravanUnload(c)
 			case PhaseIdle:
-				c.Phase = PhaseFindTrip
+				if p, g := w.caravanPlanRoute(c); p != nil {
+					c.Good = g
+					c.ToPlanet = p.ID
+					c.LastTarget = p.ID
+					c.LastTargetAt = w.Day
+					c.Phase = PhaseLoad // загрузка на своей планете
+				}
 			case PhaseFindTrip:
 				g, ok := w.caravanCheckLocalSurplus(c)
 				if ok {
@@ -377,7 +383,7 @@ func (w *World) phaseMovement() {
 					c.Phase = PhaseLoad
 					c.Progress = 0
 				} else {
-					c.Phase = PhaseFindSurplus
+					c.Phase = PhaseIdle
 				}
 			case PhaseFindSurplus:
 				p, g := w.caravanFindSurplusNearby(c)
@@ -1015,8 +1021,19 @@ func (w *World) phaseEconomy() {
 		w.checkGoodsCounters(p)
 		w.phasePopulation(p) // C2: динамика населения, первой
 		
-		if w.Day%(36*4) == 0 {
-			w.applyProduction(p)
+		// Смена экономики — раз в год (576 дней), ДО производства.
+		if w.Day%576 == 0 {
+			w.economyShift(p)
+		}
+		
+		// Производство/потребление: потребление — каждый месяц (36 дней),
+		// производство — каждые 4 месяца (144 дня).
+		if w.Day%144 == 0 {
+			// 4-й месяц: и производство, и потребление
+			w.applyProduction(p, true)
+		} else if w.Day%36 == 0 {
+			// Остальные месяцы: только потребление
+			w.applyProduction(p, false)
 		}
 		for g := 0; g < int(GoodCount); g++ {
 			w.UpdateMarketState(p, Good(g))
@@ -1029,6 +1046,8 @@ func (w *World) phaseEconomy() {
 			w.pirateLairDecay(p)
 		}
 	}
+	// Обновляем снапшоты рынков систем (для караванов/трейдеров — "биржевой стакан")
+	w.updateSystemMarketSnaps()
 	statEcon += time.Since(tEcon)
 
 	// --- Hauler: мгновенный опт (излишек → дефицит, остаток уничтожается) ---

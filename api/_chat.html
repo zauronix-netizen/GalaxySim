@@ -1,0 +1,1737 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Galaxy Sim — чат</title>
+<style>
+  body { font-family: monospace; background: #1e1e1e; color: #ddd; margin: 0; padding: 8px; display: flex; flex-direction: column; min-height: 100vh; box-sizing: border-box; }
+  #cobraPanel { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-bottom: 6px; flex-shrink: 0; }
+  #cobra { background: #000; border: 1px solid #444; display: block; }
+  #cobraLabel { color: #888; font-size: 11px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+  .tabs button { background: #333; color: #ddd; border: 1px solid #555; padding: 3px 10px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  .tabs button.active { background: #8cf; color: #111; border-color: #8cf; }
+  .tabs button:disabled { opacity: 0.35; cursor: default; }
+  .ctx { color: #888; font-size: 11px; margin-bottom: 6px; }
+  #log { flex: 1; overflow-y: auto; border: 1px solid #444; background: #151515; padding: 6px; font-size: 13px; }
+  #log div { padding: 1px 0; border-bottom: 1px solid #222; }
+  #log .nick { color: #8cf; }
+  #log .sys  { color: #888; font-style: italic; }
+  .row { display: flex; gap: 4px; margin-top: 6px; }
+  .row input.nick { width: 100px; }
+  .row input.text { flex: 1; }
+  input { background: #333; color: #ddd; border: 1px solid #555; padding: 4px; font-family: monospace; font-size: 13px; }
+  button.send { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 12px; cursor: pointer; font-family: monospace; }
+  button.send:hover { background: #444; }
+</style>
+</head>
+<body>
+<div style="display:flex; gap:8px; flex:1; min-height:0;">
+  <div style="display:flex; flex-direction:column; flex:1; min-width:0;">
+
+    <div class="tabs" id="tabs">
+      <button data-room="world" class="active">Мир</button>
+      <button data-room="sector">Сектор</button>
+      <button data-room="system">Система</button>
+      <button data-room="planet">Планета</button>
+      <button data-room="cmd">Команды</button>
+    </div>
+
+    <!-- рендер + ctx слева, карта + кнопки справа -->
+    <div style="display:flex; gap:8px; align-items:flex-start; flex-shrink:0;">
+
+      <div style="display:flex; flex-direction:column; gap:6px; min-width:0;">
+        <canvas id="cobra" width="720" height="480"
+                style="border:1px solid #444; background:#111; display:block; width:720px; height:480px;"></canvas>
+        <div class="tabs" id="shipBtns" style="max-width:600px;">
+          <button data-cmd="/set">set</button>
+          <button data-cmd="/spawn">spawn</button>
+          <button data-cmd="/undock">undock</button>
+          <button data-cmd="/dock">dock</button>
+          <button data-cmd="/orbit">orbit</button>
+          <button data-cmd="/goto">goto</button>
+          <button data-cmd="/toedge">toedge</button>
+          <button data-cmd="/despawn">despawn</button>
+          <button data-cmd="/state">state</button>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:8px; min-width:0;">
+        <canvas id="sysmap" width="480" height="480"
+                style="border:1px solid #444; background:#111; display:block; width:480px; height:480px;"></canvas>
+        
+                <div class="ctx" id="ctx">—</div>
+      </div>
+
+    </div>
+
+    <div id="log"></div>
+    <div class="row">
+      <input class="nick" id="nick" placeholder="ник" maxlength="20">
+      <input class="text" id="text" placeholder="сообщение… (/spawn /despawn /orbit /goto /state)" maxlength="200">
+      <button class="send" id="send">send</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const planetID = parseInt(params.get("planet") || "0", 10);
+
+const PLANET_COLORS = ["#e05555","#55c855","#b05ad0","#5a9ae0","#e0c040"];
+const ORBIT_K = 0.05;
+let worldDay = 0;
+let sysData = null;
+let shipData = null;
+
+let otherShips = [];   // корабли в системе (для карты)
+let sysShipsSim = [];  // корабли симуляции (трейдеры/караваны/пираты) — из /mmo/systemobj
+let sysObjDay = -1;    // день, за который снимок уже взят
+
+let clickInfo = "";   // текст для правого верхнего угла
+
+let clickObj = null;    // {kind:"star"|"planet"|"ship"|"coord", id, pos}
+let selected = null;    // {kind:"planet"|"ship", id}
+
+let planet = null;   // {id, star, sector}
+let roomKeys = {};   // "world"/"sector"/"system"/"planet" → "world" / "sector:5" / "system:42" / "planet:1001"
+let activeTab = "world";
+let lastID = 0;
+let pollTimer = null;
+
+const logEl = document.getElementById("log");
+const nickEl = document.getElementById("nick");
+const textEl = document.getElementById("text");
+const ctxEl = document.getElementById("ctx");
+
+// --- ник: localStorage ---
+nickEl.value = localStorage.getItem("gs_chat_nick") || "";
+
+let playerId = parseInt(localStorage.getItem("gs_player_id") || "0", 10);
+if (!playerId) {
+  playerId = Math.floor(Math.random() * 1e9) + 1;
+  localStorage.setItem("gs_player_id", playerId);
+}
+
+nickEl.addEventListener("change", () => {
+  localStorage.setItem("gs_chat_nick", nickEl.value.trim());
+});
+
+const keys = {};
+// В полях ввода чата (ник/сообщение) клавиши корабля не работают
+window.addEventListener('keydown', e => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  keys[e.code] = true;
+  // Скорость 0..10: Z (+1), X (−1), C (стоп) — дискретно, по нажатию
+  if (e.code === 'KeyZ') cobraSpeed = Math.min(COBRA_SPEED_MAX, cobraSpeed + 1);
+  if (e.code === 'KeyX') cobraSpeed = Math.max(0, cobraSpeed - 1);
+  if (e.code === 'KeyC') cobraSpeed = 0;
+  if (e.code === 'KeyK') cobraShipVisible = !cobraShipVisible; // K — кобра вкл/выкл
+});
+window.addEventListener('keyup', e => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  keys[e.code] = false;
+});
+
+function shipIds() {
+  const s = localStorage.getItem("gs_ship_ids") || "";
+  return s ? s.split(",").map(x => parseInt(x, 10)).filter(x => x > 0) : [];
+}
+
+function shipIdsSave(arr) {
+  if (arr.length === 0) {
+    localStorage.removeItem("gs_ship_ids");
+    localStorage.removeItem("gs_ship_id");
+  } else {
+    localStorage.setItem("gs_ship_ids", arr.join(","));
+    localStorage.setItem("gs_ship_id", arr[arr.length - 1]);
+  }
+}
+
+// --- контекст из ?planet= ---
+async function loadPlanet() {
+  if (!planetID) return;
+  try {
+    const r = await fetch("/planet/" + planetID);
+    if (!r.ok) return;
+    const p = await r.json();
+    planet = { id: p.id, star: p.star, sector: p.sector };
+  } catch (e) { console.error(e); }
+}
+
+function buildRoomKeys() {
+  roomKeys = { world: "world", cmd: "cmd" };   // cmd — особый случай (не комната чата)
+  if (planet) {
+    roomKeys.sector = "sector:" + planet.sector;
+    roomKeys.system = "system:" + planet.star;
+    roomKeys.planet = "planet:" + planet.id;
+  }
+}
+
+// --- табы ---
+const tabsEl = document.getElementById("tabs");
+tabsEl.querySelectorAll("button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const room = btn.dataset.room;
+    if (!roomKeys[room]) return; // disabled
+    activeTab = room;
+    tabsEl.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+    switchRoom();
+  });
+});
+
+function updateTabsState() {
+  tabsEl.querySelectorAll("button").forEach(btn => {
+    const room = btn.dataset.room;
+    btn.disabled = !roomKeys[room];
+  });
+}
+
+// --- лента ---
+function clearLog() {
+  logEl.innerHTML = "";
+}
+
+function appendMessage(m) {
+  const div = document.createElement("div");
+  const nick = document.createElement("span");
+  nick.className = "nick";
+  nick.textContent = m.nick + ": ";
+  const text = document.createElement("span");
+  text.textContent = m.text;
+  div.appendChild(nick);
+  div.appendChild(text);
+  logEl.appendChild(div);
+}
+
+function appendSystem(text) {
+  const div = document.createElement("div");
+  div.className = "sys";
+  div.textContent = "— " + text + " —";
+  logEl.appendChild(div);
+}
+
+// --- polling ---
+async function poll() {
+  const room = roomKeys[activeTab];
+  if (!room) return;
+  try {
+    const r = await fetch(`/chat/messages?room=${encodeURIComponent(room)}&since=${lastID}`);
+    if (!r.ok) return;
+    const arr = await r.json();
+    if (Array.isArray(arr) && arr.length > 0) {
+      for (const m of arr) {
+        appendMessage(m);
+        if (m.id > lastID) lastID = m.id;
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  } catch (e) { console.error(e); }
+  pollTimer = setTimeout(poll, 2000);
+}
+
+function switchRoom() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  lastID = 0;
+  clearLog();
+  updateCtx();
+  if (activeTab === "cmd") {
+    appendSystem("таб команд");
+    return;
+  }
+  appendSystem("комната: " + roomKeys[activeTab]);
+  poll();
+}
+
+function updateCtx() {
+  if (planet) {
+    ctxEl.textContent = `planet=${planet.id} star=${planet.star} sector=${planet.sector}`;
+  } else {
+    ctxEl.textContent = "контекст планеты не задан (?planet=ID) — только мир";
+  }
+}
+
+function getPlanetPosJS(p, day, starId) {
+  const r = p.orbit;
+  const baseAng = p.id * 137.508 * Math.PI / 180 + starId * 37.0 * Math.PI / 180;
+  const speed = ORBIT_K / p.orbit;
+  const ang = baseAng + speed * day;
+  return { x: r * Math.cos(ang), y: r * Math.sin(ang) };
+}
+
+function drawSysMap() {
+  const canvas = document.getElementById("sysmap");
+  if (!canvas || !sysData) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#111"; ctx.fillRect(0, 0, W, H);
+
+  const cx = W/2, cy = H/2, margin = 20;
+  const R_out = Math.min(W, H)/2 - margin;
+  let maxOrbit = 0;
+  for (const p of sysData.planets) if (p.orbit > maxOrbit) maxOrbit = p.orbit;
+  if (maxOrbit <= 0) maxOrbit = 1;
+  const scale = R_out / maxOrbit;
+
+  // Орбиты
+  ctx.lineWidth = 1;
+  for (const p of sysData.planets) {
+    const r = R_out * (p.orbit / maxOrbit);
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.strokeStyle = p.habitable ? "rgba(90,150,230,0.45)" : "rgba(120,120,120,0.35)";
+    ctx.stroke();
+  }
+
+  // Планеты
+  const ringID = (selected && selected.kind === "planet") ? selected.id : planetID;
+  for (const p of sysData.planets) {
+    const r = R_out * (p.orbit / maxOrbit);
+    const pos = getPlanetPosJS(p, worldDay, sysData.starId);
+    const x = cx + pos.x * scale, y = cy + pos.y * scale;
+    let color = "#808080";
+    if (p.habitable && p.race >= 0 && p.race < 5) color = PLANET_COLORS[p.race];
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+    if (p.id === ringID) {
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1;
+    }
+  }
+
+  // Свой корабль (r=2, без подписи, Безье от start к target)
+  if (shipData) {
+    const r = Math.hypot(shipData.pos.X, shipData.pos.Y);
+    const ang = Math.atan2(shipData.pos.Y, shipData.pos.X);
+    const x = cx + Math.cos(ang) * r * scale;
+    const y = cy + Math.sin(ang) * r * scale;
+
+    let myColor = "#6f6";
+    if (selected && selected.kind === "ship" && selected.id === shipData.shipId) {
+      myColor = (selected.player === playerId) ? "#f0f" : "#f66";
+    }
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI*2);
+    ctx.fillStyle = myColor; ctx.fill();
+
+    // Безье от старта к цели goto/edge — как в index.html (drawSector).
+    if (shipData.target && shipData.start && (shipData.kind === 2 || shipData.kind === 3)) {
+      const ax = shipData.start.X, ay = shipData.start.Y;
+      const bx = shipData.target.X, by = shipData.target.Y;
+      const midX = (ax + bx) / 2, midY = (ay + by) / 2;
+      const dx = bx - ax, dy = by - ay;
+      const lenAB = Math.hypot(dx, dy);
+      if (lenAB > 0.01) {
+        let nx = -dy / lenAB, ny = dx / lenAB;
+        if (midX * nx + midY * ny < 0) { nx = -nx; ny = -ny; }
+        const RSafe = 0.3;
+        const offset = RSafe + lenAB * 0.25;
+        const ctrlX = midX + nx * offset;
+        const ctrlY = midY + ny * offset;
+
+        ctx.beginPath();
+        ctx.strokeStyle = "#8cf";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        for (let i = 0; i <= 20; i++) {
+          const t = i / 20, mt = 1 - t;
+          const px = mt*mt*ax + 2*mt*t*ctrlX + t*t*bx;
+          const py = mt*mt*ay + 2*mt*t*ctrlY + t*t*by;
+          const sx = cx + px * scale;
+          const sy = cy + py * scale;
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  // Чужие корабли в системе — оранжевые точки (выбранный чужой — красный).
+  for (const sh of otherShips) {
+    if (sh.shipId === (shipData ? shipData.shipId : -1)) continue;
+    const sx = cx + sh.pos.X * scale;
+    const sy = cy + sh.pos.Y * scale;
+    let color = "#fc6";
+    if (selected && selected.kind === "ship" && selected.id === sh.shipId) {
+      color = (selected.player === playerId) ? "#f0f" : "#f66";
+    }
+    ctx.beginPath(); ctx.arc(sx, sy, 2, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+  }
+
+  // Корабли симуляции: точка + цель (куда летит), цвет по типу.
+  const SIM_COLORS = {1: "#4ac", 2: "#dd7", 3: "#c9f", 4: "#9df", 5: "#f66"};
+  for (const o of sysShipsSim) {
+    const sx = cx + o.x * scale, sy = cy + o.y * scale;
+    const tx = cx + o.tx * scale, ty = cy + o.ty * scale;
+    const col = SIM_COLORS[o.k] || "#888";
+    if (o.k !== 5 && Math.hypot(tx - sx, ty - sy) > 1) {
+      ctx.beginPath();
+      ctx.strokeStyle = col;
+      ctx.globalAlpha = 0.35;
+      ctx.setLineDash([2, 3]);
+      ctx.moveTo(sx, sy); ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath(); ctx.arc(sx, sy, 1.5, 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+  }
+
+  // Звезда
+  ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2);
+  ctx.fillStyle = "#c9a227"; ctx.fill();
+
+  // Подписи
+  ctx.fillStyle = "#888"; ctx.font = "11px monospace";
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillText(`star=${sysData.starId} sector=${sysData.sector} day=${worldDay}`, 6, 14);
+  ctx.fillText(`home: planet=${planetID}`, 6, 28);
+
+  // Клик-инфо — правый верхний.
+  if (clickInfo) {
+    ctx.fillStyle = "#8cf";
+    ctx.textAlign = "right";
+    ctx.fillText(clickInfo, W - 8, 14);
+    ctx.textAlign = "left";
+  }
+}
+
+document.getElementById("sysmap").addEventListener("click", (e) => {
+  if (!sysData) return;
+  const canvas = e.target;
+  const rect = canvas.getBoundingClientRect();
+  const clickX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const clickY = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2, margin = 20;
+  const R_out = Math.min(W, H)/2 - margin;
+  let maxOrbit = 0;
+  for (const p of sysData.planets) if (p.orbit > maxOrbit) maxOrbit = p.orbit;
+  if (maxOrbit <= 0) maxOrbit = 1;
+  const scale = R_out / maxOrbit;
+
+  const wx = (clickX - cx) / scale;
+  const wy = (clickY - cy) / scale;
+
+  if (Math.hypot(clickX - cx, clickY - cy) < 8) {
+    clickObj = { kind: "star", id: sysData.starId, pos: { X: 0, Y: 0 } };
+    clickInfo = `star = ${sysData.starId}`;
+    drawSysMap(); return;
+  }
+  for (const p of sysData.planets) {
+    const pos = getPlanetPosJS(p, worldDay, sysData.starId);
+    const sx = cx + pos.x * scale, sy = cy + pos.y * scale;
+    if (Math.hypot(clickX - sx, clickY - sy) < 8) {
+      clickObj = { kind: "planet", id: p.id, pos: pos };
+      clickInfo = `planet = ${p.id}`;
+      drawSysMap(); return;
+    }
+  }
+  const ships = [];
+  if (shipData) ships.push({ id: shipData.shipId, pos: shipData.pos });
+  for (const sh of otherShips) ships.push({ id: sh.shipId, pos: sh.pos });
+  for (const sh of ships) {
+    const sx = cx + sh.pos.X * scale, sy = cy + sh.pos.Y * scale;
+    if (Math.hypot(clickX - sx, clickY - sy) < 6) {
+      clickObj = { kind: "ship", id: sh.id, pos: sh.pos };
+      clickInfo = `ship = ${sh.id}`;
+      drawSysMap(); return;
+    }
+  }
+  clickObj = { kind: "coord", id: 0, pos: { X: wx, Y: wy } };
+  clickInfo = `coord: ${wx.toFixed(3)}, ${wy.toFixed(3)}`;
+  drawSysMap();
+});
+
+async function loadSystem(starID) {
+  try { const r = await fetch("/system/" + starID); if (r.ok) sysData = await r.json(); } catch (e) { console.error(e); }
+}
+async function loadShip(shipID) {
+  try { const r = await fetch("/mmo/state?ship=" + shipID); if (r.ok) shipData = await r.json(); } catch (e) { console.error(e); }
+}
+async function pollDay() {
+  try { const r = await fetch("/world"); if (r.ok) worldDay = (await r.json()).day; } catch (e) {}
+  setTimeout(pollDay, 1000);
+}
+
+let lastHour = -1;
+
+async function pollShipsBySystem() {
+  try {
+    if (sysData) {
+      const r = await fetch("/mmo/ships?system=" + sysData.starId);
+      if (r.ok) otherShips = await r.json();
+    }
+  } catch (e) {}
+  setTimeout(pollShipsBySystem, 1000);
+}
+
+// Корабли симуляции — раз в игровой день (сервер отдаёт снимок раз в 2048 тиков).
+async function pollSystemObjects() {
+  try {
+    if (sysData && worldDay !== sysObjDay) {
+      const r = await fetch("/mmo/systemobj?system=" + sysData.starId);
+      if (r.ok) {
+        const j = await r.json();
+        sysShipsSim = j.ships || [];
+        sysObjDay = worldDay;
+        drawSysMap();
+      }
+    }
+  } catch (e) {}
+  setTimeout(pollSystemObjects, 1000);
+}
+
+async function pollShipByHour() {
+  try {
+    const r = await fetch("/world");
+    if (r.ok) {
+      const j = await r.json();
+      worldDay = j.day;
+      if (j.hour !== lastHour) {
+        lastHour = j.hour;
+        const sid = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+        if (sid) await loadShip(sid);
+      }
+    }
+  } catch (e) {}
+  setTimeout(pollShipByHour, 500);
+}
+
+// --- отправка ---
+async function send() {
+  const text = textEl.value.trim();
+  if (!text) return;
+  if (text.startsWith("/")) {
+    if (activeTab !== "cmd") {
+      textEl.value = "";
+      appendSystem("команды только в табе Команды");
+      return;
+    }
+    textEl.value = "";
+    await handleCommand(text);
+    return;
+  }
+  if (activeTab === "cmd") {
+    textEl.value = "";
+    appendSystem("только команды (/...)");
+    return;
+  }
+  const room = roomKeys[activeTab];
+  if (!room) return;
+  const nick = (nickEl.value.trim() || "anon").slice(0, 20);
+  try {
+    const r = await fetch("/chat/messages", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room, nick, text }),
+    });
+    if (!r.ok) { appendSystem("ошибка отправки: " + r.status); return; }
+    textEl.value = "";
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    poll();
+  } catch (e) { appendSystem("ошибка сети"); console.error(e); }
+}
+
+async function handleCommand(text) {
+  const parts = text.split(/\s+/);
+  const cmd = parts[0];
+  const sid = () => parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+  const shipIdOrArg = (idx) => parseInt(parts[idx] || "0", 10);
+
+  try {
+    if (cmd === "/spawn") {
+      if (!planet) { appendSystem("нет планеты (?planet)"); return; }
+      const r = await fetch("/mmo/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId, systemId: planet.star, dockId: planet.id }),
+      });
+      if (!r.ok) { appendSystem("spawn: ошибка " + r.status); return; }
+      const j = await r.json();
+      const arr = shipIds();
+      arr.push(j.shipId);
+      shipIdsSave(arr);
+      appendSystem(`spawn: ship=${j.shipId} system=${j.systemId} dock=${j.dockId}`);
+      await loadShip(j.shipId);
+
+    } else if (cmd === "/despawn") {
+      const id = parseInt(parts[1] || "0", 10);
+      if (!id) { appendSystem("despawn: укажи shipId — /despawn <shipId>"); return; }
+      const r = await fetch("/mmo/despawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shipId: id }),
+      });
+      if (!r.ok) { appendSystem("despawn: ошибка " + r.status); return; }
+      const arr = shipIds().filter(x => x !== id);
+      shipIdsSave(arr);
+      if (arr.length === 0) shipData = null;
+      appendSystem("despawn: ship=" + id);
+
+    } else if (cmd === "/despawnall") {
+      const arr = shipIds();
+      if (arr.length === 0) { appendSystem("despawnall: нет кораблей"); return; }
+      for (const id of arr) {
+        try {
+          await fetch("/mmo/despawn", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shipId: id }),
+          });
+        } catch (e) { console.error(e); }
+      }
+      shipIdsSave([]);
+      shipData = null;
+      appendSystem("despawnall: удалено " + arr.length);
+
+    } else if (cmd === "/orbit") {
+      const id = parseInt(parts[1] || "0", 10);
+      if (!id) { appendSystem("orbit: укажи shipId — /orbit <shipId> [planet] [radius]"); return; }
+      const pid = parseInt(parts[2] || "0", 10) || (planet ? planet.id : 0);
+      const rad = parseFloat(parts[3] || "0.15");
+      const r = await fetch("/mmo/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId, shipId: id, kind: 0, planet: pid, radius: rad }),
+      });
+      if (!r.ok) { appendSystem("orbit: ошибка " + r.status); return; }
+      const j = await r.json();
+      appendSystem(`orbit: eta=${j.eta}`);
+      await loadShip(id);
+
+    } else if (cmd === "/goto") {
+      const id = parseInt(parts[1] || "0", 10);
+      if (!id) { appendSystem("goto: укажи shipId — /goto <shipId> x y"); return; }
+      const x = parseFloat(parts[2] || "0");
+      const y = parseFloat(parts[3] || "0");
+      const r = await fetch("/mmo/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId, shipId: id, kind: 1, target: { X: x, Y: y } }),
+      });
+      if (!r.ok) { appendSystem("goto: ошибка " + r.status); return; }
+      const j = await r.json();
+      appendSystem(`goto: eta=${j.eta}`);
+      await loadShip(id);
+
+    } else if (cmd === "/state") {
+      const id = parseInt(parts[1] || "0", 10);
+      if (!id) { appendSystem("state: укажи shipId — /state <shipId>"); return; }
+      await loadShip(id);
+      if (shipData) {
+        appendSystem(
+          `state: ship=${shipData.shipId} player=${shipData.playerId} ` +
+          `pos=(${shipData.pos.X.toFixed(3)},${shipData.pos.Y.toFixed(3)}) ` +
+          `docked=${shipData.docked} eta=${shipData.eta}`
+        );
+      } else {
+        appendSystem("state: нет корабля");
+      }
+
+    } else {
+      appendSystem("неизвестная команда: " + cmd);
+    }
+  } catch (e) {
+    appendSystem("ошибка сети: " + e.message);
+  }
+  drawSysMap();
+}
+
+document.getElementById("send").addEventListener("click", send);
+textEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); send(); }
+});
+
+document.querySelectorAll("#shipBtns button[data-cmd]").forEach(b => {
+  b.addEventListener("click", async () => {
+    if (b.dataset.cmd === "/set") {
+      if (!clickObj || (clickObj.kind !== "planet" && clickObj.kind !== "ship")) {
+        appendSystem("set: кликни по планете или кораблю на карте");
+        return;
+      }
+      if (clickObj.kind === "planet") {
+        selected = { kind: "planet", id: clickObj.id };
+        appendSystem(`set: выбран planet=${clickObj.id}`);
+        drawSysMap();
+        return;
+      }
+      let owner = 0;
+      try {
+        const r = await fetch("/mmo/state?ship=" + clickObj.id);
+        if (r.ok) { const sd = await r.json(); owner = sd.playerId; }
+      } catch (e) {}
+      selected = { kind: "ship", id: clickObj.id, player: owner };
+      if (owner === playerId) {
+        appendSystem(`set: выбран свой ship=${clickObj.id}`);
+      } else {
+        appendSystem(`set: корабль не наш (ship=${clickObj.id} player=${owner})`);
+      }
+      drawSysMap();
+      return;
+    }
+    if (b.dataset.cmd === "/despawn") {
+      if (!selected || selected.kind !== "ship") {
+        appendSystem("despawn: выбери корабль (set / клик по кораблю)");
+        return;
+      }
+      if (selected.player !== playerId) {
+        appendSystem(`despawn: корабль не наш (ship=${selected.id} player=${selected.player})`);
+        return;
+      }
+      const id = selected.id;
+      try {
+        const r = await fetch("/mmo/despawn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ shipId: id }),
+        });
+        if (!r.ok) { appendSystem("despawn: ошибка " + r.status); return; }
+      } catch (e) { appendSystem("despawn: ошибка сети"); return; }
+      const arr = shipIds().filter(x => x !== id);
+      shipIdsSave(arr);
+      if (arr.length === 0) shipData = null;
+      selected = null;
+      appendSystem(`despawn: ship=${id}`);
+      drawSysMap();
+      return;
+    }
+    if (b.dataset.cmd === "/state") {
+      if (!selected || selected.kind !== "ship") {
+        appendSystem("state: выбери корабль (set / клик по кораблю)");
+        return;
+      }
+      try {
+        const r = await fetch("/mmo/state?ship=" + selected.id);
+        if (!r.ok) { appendSystem("state: ошибка " + r.status); return; }
+        const sd = await r.json();
+        appendSystem(
+          `state: ship=${sd.shipId} player=${sd.playerId} ` +
+          `pos=(${sd.pos.X.toFixed(3)},${sd.pos.Y.toFixed(3)}) ` +
+          `docked=${sd.docked} eta=${sd.eta}`
+        );
+      } catch (e) { appendSystem("state: ошибка сети"); }
+      return;
+    }
+    if (b.dataset.cmd === "/goto") {
+      // корабль: selected → gs_ship_id → свой/чужой
+      let shipId = 0, own = true;
+      if (selected && selected.kind === "ship") {
+        shipId = selected.id;
+        own = (selected.player === playerId);
+      } else {
+        shipId = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+      }
+      if (!shipId) { appendSystem("goto: нет корабля (spawn / set)"); return; }
+      if (!own) { appendSystem(`goto: корабль не наш (ship=${shipId})`); return; }
+      if (!clickObj || clickObj.kind !== "coord") {
+        appendSystem("goto: кликни по пустому месту на карте");
+        return;
+      }
+      const x = clickObj.pos.X, y = clickObj.pos.Y;
+      try {
+        const r = await fetch("/mmo/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId, shipId, kind: 1, target: { X: x, Y: y } }),
+        });
+        if (!r.ok) { appendSystem("goto: ошибка " + r.status); return; }
+        const j = await r.json();
+        appendSystem(`goto: ship=${shipId} eta=${j.eta}`);
+        await loadShip(shipId);
+      } catch (e) { appendSystem("goto: ошибка сети"); }
+      drawSysMap();
+      return;
+    }
+    if (b.dataset.cmd === "/undock") {
+      let shipId = 0, own = true;
+      if (selected && selected.kind === "ship") {
+        shipId = selected.id;
+        own = (selected.player === playerId);
+      } else {
+        shipId = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+      }
+      if (!shipId) { appendSystem("undock: нет корабля (spawn / set)"); return; }
+      if (!own) { appendSystem(`undock: корабль не наш (ship=${shipId})`); return; }
+      try {
+        const r = await fetch("/mmo/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId, shipId, kind: 4, planet: planetID, radius: 0 }),
+        });
+        if (!r.ok) { appendSystem("undock: ошибка " + r.status); return; }
+        const j = await r.json();
+        appendSystem(`undock: ship=${shipId} eta=${j.eta}`);
+        await loadShip(shipId);
+        // Запуск анимации вылета в 3D-виде
+        cobraMode = "undock";
+        cobraUndockStart = performance.now();
+        cobraUndockT = 0;
+      } catch (e) { appendSystem("undock: ошибка сети"); }
+      drawSysMap();
+      return;
+    }
+    if (b.dataset.cmd === "/toedge") {
+      let shipId = 0, own = true, pos = null;
+      if (selected && selected.kind === "ship") {
+        shipId = selected.id;
+        own = (selected.player === playerId);
+        pos = (shipData && shipData.shipId === shipId) ? shipData.pos : null;
+      } else {
+        shipId = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+        pos = shipData ? shipData.pos : null;
+      }
+      if (!shipId) { appendSystem("toedge: нет корабля (spawn / set)"); return; }
+      if (!own) { appendSystem(`toedge: корабль не наш (ship=${shipId})`); return; }
+
+      const R = (sysData && sysData.systemRadius) ? sysData.systemRadius : 8;
+
+      // Направление: от звезды в сторону клика (если есть), иначе — от звезды через корабль.
+      let ang = null;
+      if (clickObj && clickObj.kind === "coord") {
+        ang = Math.atan2(clickObj.pos.Y, clickObj.pos.X);
+      } else if (pos && (pos.X !== 0 || pos.Y !== 0)) {
+        ang = Math.atan2(pos.Y, pos.X);
+      }
+
+      let x, y;
+      if (ang === null) {
+        x = R; y = 0; // дефолт — восток
+      } else {
+        const oct = Math.round(ang / (Math.PI/4)) * (Math.PI/4);
+        x = R * Math.cos(oct);
+        y = R * Math.sin(oct);
+      }
+
+      try {
+        const r = await fetch("/mmo/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId, shipId, kind: 2, target: { X: x, Y: y } }),
+        });
+        if (!r.ok) { appendSystem("toedge: ошибка " + r.status); return; }
+        const j = await r.json();
+        appendSystem(`toedge: ship=${shipId} eta=${j.eta}`);
+        await loadShip(shipId);
+      } catch (e) { appendSystem("toedge: ошибка сети"); }
+      drawSysMap();
+      return;
+    }
+    if (b.dataset.cmd === "/orbit") {
+      // корабль: selected → gs_ship_id → свой/чужой
+      let shipId = 0, own = true;
+      if (selected && selected.kind === "ship") {
+        shipId = selected.id;
+        own = (selected.player === playerId);
+      } else {
+        shipId = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+      }
+      if (!shipId) { appendSystem("orbit: нет корабля (spawn / set)"); return; }
+      if (!own) { appendSystem(`orbit: корабль не наш (ship=${shipId})`); return; }
+      // планета: selected если planet, иначе home planet (planetID)
+      let pid = 0;
+      if (selected && selected.kind === "planet") pid = selected.id;
+      else if (planet) pid = planet.id;
+      else { appendSystem("orbit: нет планеты (set / ?planet=ID)"); return; }
+      const rad = 0.15; // дефолтный OrbitRadius
+      try {
+        const r = await fetch("/mmo/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId, shipId, kind: 0, planet: pid, radius: rad }),
+        });
+        if (!r.ok) { appendSystem("orbit: ошибка " + r.status); return; }
+        const j = await r.json();
+        appendSystem(`orbit: ship=${shipId} planet=${pid} eta=${j.eta}`);
+        await loadShip(shipId);
+        // Запуск анимации расстыковки → после неё переход в planet_orbit.
+        cobraMode = "undock";
+        cobraUndockStart = performance.now();
+        cobraAfterUndock = "planet_orbit";
+      } catch (e) { appendSystem("orbit: ошибка сети"); }
+      drawSysMap();
+      return;
+    }
+    await handleCommand(b.dataset.cmd);
+  });
+});
+
+// === Cobra Mk III — autorotate canvas ===
+const COBRA_MK3 = {
+  scale: 0.5, // масштаб модели (1.0 = оригинальные координаты Elite)
+  vertices: [
+    [ 32,   0,  76], [ -32,   0,  76], [  0,  26,  24], [-120,  -3,  -8],
+    [120,  -3,  -8], [ -88,  16, -40], [ 88,  16, -40], [128,  -8, -40],
+    [-128, -8, -40], [  0,  26, -40], [-32, -24, -40], [ 32, -24, -40],
+    [-36,   8, -40], [ -8,  12, -40], [  8,  12, -40], [ 36,   8, -40],
+    [ 36, -12, -40], [  8, -16, -40], [ -8, -16, -40], [-36, -12, -40],
+    [  0,   0,  76], [  0,   0,  90], [-80,  -6, -40], [-80,   6, -40],
+    [-88,   0, -40], [ 80,   6, -40], [ 88,   0, -40], [ 80,  -6, -40]
+  ],
+  edges: [
+    [ 0,  1,  0, 11], [ 0,  4,  4, 12], [ 1,  3,  3, 10], [ 3,  8,  7, 10],
+    [ 4,  7,  8, 12], [ 6,  7,  8,  9], [ 6,  9,  6,  9], [ 5,  9,  5,  9],
+    [ 5,  8,  7,  9], [ 2,  5,  1,  5], [ 2,  6,  2,  6], [ 3,  5,  3,  7],
+    [ 4,  6,  4,  8], [ 1,  2,  0,  1], [ 0,  2,  0,  2], [ 8, 10,  9, 10],
+    [10, 11,  9, 11], [ 7, 11,  9, 12], [ 1, 10, 10, 11], [ 0, 11, 11, 12],
+    [ 1,  5,  1,  3], [ 0,  6,  2,  4], [20, 21,  0, 11], [12, 13,  9,  9],
+    [18, 19,  9,  9], [14, 15,  9,  9], [16, 17,  9,  9], [15, 16,  9,  9],
+    [14, 17,  9,  9], [13, 18,  9,  9], [12, 19,  9,  9], [ 2,  9,  5,  6],
+    [22, 24,  9,  9], [23, 24,  9,  9], [22, 23,  9,  9], [25, 26,  9,  9],
+    [26, 27,  9,  9], [25, 27,  9,  9]
+  ],
+  faces: [
+    [  0,  62,  31], [-18,  55,  16], [ 18,  55,  16], [-16,  52,  14],
+    [ 16,  52,  14], [-14,  47,   0], [ 14,  47,   0], [-61, 102,   0],
+    [ 61, 102,   0], [  0,   0, -80], [ -7, -42,   9], [  0, -30,   6],
+    [  7, -42,   9]
+  ]
+};
+
+// === Coriolis-станция — оригинальные данные SHIP_CORIOLIS из Elite (BBC Micro) ===
+// 16 вершин / 28 рёбер / 14 граней. Это восьмиугольная станция с посадочным
+// слотом на переднем торце (вершины 12–15, рёбра 24–27 — прямоугольник шлюза).
+const CORIOLIS = {
+  scale: 0.025, // мир в юнитах: радиус 160*0.025 = 4 юнита, диаметр 8
+  vertices: [
+    [ 160,    0,  160], [   0,  160,  160], [-160,    0,  160], [   0, -160,  160],
+    [ 160, -160,    0], [ 160,  160,    0], [-160,  160,    0], [-160, -160,    0],
+    [ 160,    0, -160], [   0,  160, -160], [-160,    0, -160], [   0, -160, -160],
+    [  10,  -30,  160], [  10,   30,  160], [ -10,   30,  160], [ -10,  -30,  160]
+  ],
+  edges: [
+    [ 0,  3,  0,  1], [ 0,  1,  0,  2], [ 1,  2,  0,  3], [ 2,  3,  0,  4],
+    [ 3,  4,  1,  5], [ 0,  4,  1,  6], [ 0,  5,  2,  6], [ 5,  1,  2,  8],
+    [ 1,  6,  3,  8], [ 2,  6,  3,  7], [ 2,  7,  4,  7], [ 3,  7,  4,  5],
+    [ 8, 11, 10, 13], [ 8,  9, 11, 13], [ 9, 10, 12, 13], [10, 11,  9, 13],
+    [ 4, 11,  5, 10], [ 4,  8,  6, 10], [ 5,  8,  6, 11], [ 5,  9,  8, 11],
+    [ 6,  9,  8, 12], [ 6, 10,  7, 12], [ 7, 10,  7,  9], [ 7, 11,  5,  9],
+    [12, 13,  0,  0], [13, 14,  0,  0], [14, 15,  0,  0], [15, 12,  0,  0]
+  ],
+  faces: [
+    [   0,    0,  160], [ 107, -107,  107], [ 107,  107,  107], [-107,  107,  107],
+    [-107, -107,  107], [   0, -160,    0], [ 160,    0,    0], [-160,    0,    0],
+    [   0,  160,    0], [-107, -107, -107], [ 107, -107, -107], [ 107,  107, -107],
+    [-107,  107, -107], [   0,    0, -160]
+  ]
+};
+
+// Станция: roll — вращение слота на месте вокруг своей оси; pos — витрина в режиме orbit.
+// Жёсткий yaw/pitch больше не задаются: при отрисовке станция наводится строго на камеру
+// (yaw/pitch считаются из её позиции — торец со слотом всегда смотрит в центр экрана).
+const cobraStation = {
+  pos: [53, 21, 100],      // orbit-витрина: станция правее-выше кобры, размер задаёт CORIOLIS.scale
+  roll: 0                  // вращение вокруг собственной оси (слот крутится на месте)
+};
+
+// Демка planet_orbit: мир — ТОР 1000x1000 с ЦЕНТРОМ в (0,0) (координаты −500..+500).
+// Станция в фиксированной ячейке сетки, прямо по курсу от старта (0,0).
+const COBRA_STATION_GRID = { x: 0, y: 75 }; // 75 юнитов вперёд по курсу
+const COBRA_STATION_NEAR = 0;   // не рисуем ближе NEAR юнитов (0 — рисуем всегда)
+const COBRA_STATION_FAR = 450;  // дистанция отрисовки станции: видна сразу со старта (d=75)
+const COBRA_STATION_ALT_PX = 1; // поправка высоты: 1 ед. alt = 1 px (как у компаса)
+
+// Вектор на станцию в «камерных» координатах: side — вбок, vert — по высоте, fwd — вперёд.
+// Разница координат заворачивается по тору (кратчайший путь): станция корректна
+// в ЛЮБОЙ точке мира — и рядом с нулём (пролетали шов на 100-поле), и у шва на ±500.
+function cobraStationVec() {
+  const sdx = cobraWrap(COBRA_STATION_GRID.x - cobraLocalX);
+  const sdy = cobraWrap(COBRA_STATION_GRID.y - cobraLocalY);
+  const fwd  = sdx * Math.sin(cameraYaw) + sdy * Math.cos(cameraYaw);
+  const side = sdx * Math.cos(cameraYaw) - sdy * Math.sin(cameraYaw);
+  const vert = -cobraAltitude * COBRA_STATION_ALT_PX * fwd / COBRA_FOV; // мировая высота центра станции
+  return { fwd, side, vert };
+}
+
+// K — показать/скрыть модель кобры в planet_orbit
+let cobraShipVisible = true;
+
+function norm3(v) {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+function cross3(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]
+  ];
+}
+function tidyMatrix(m) {
+  m.z = norm3(m.z);
+  m.x = norm3(cross3(m.y, m.z));
+  m.y = cross3(m.z, m.x);
+}
+function rotVecY(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+}
+function rotVecX(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c];
+}
+function rotVecZ(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2]];
+}
+
+// Каркасная отрисовка модели в формате Elite (vertices/edges/faces) для режима orbit.
+// Камера в (0,0,0) смотрит на +z; модель стоит в pos.
+// Повороты: yaw вокруг мировой Y, затем pitch вокруг X, затем roll вокруг СВОЕЙ оси Z
+// (roll применяется к вершине первым — это вращение вокруг оси самой модели).
+function drawEliteModel(model, pos, yaw, pitch, roll, color, lw) {
+  const W = cobraCanvas.width, H = cobraCanvas.height;
+  const cx = W / 2, cy = H / 2;
+  const rx = rotVecY([1, 0, 0], yaw), ry = rotVecY([0, 1, 0], yaw), rz = rotVecY([0, 0, 1], yaw);
+  const mx0 = rotVecX(rx, pitch), my0 = rotVecX(ry, pitch), mz0 = rotVecX(rz, pitch);
+  const mx = rotVecZ(mx0, roll), my = rotVecZ(my0, roll), mz = rotVecZ(mz0, roll);
+  const m = { x: mx, y: my, z: mz };
+  const s = model.scale || 1; // масштаб из константы модели
+  const proj = model.vertices.map(v => {
+    const wx = pos[0] + v[0] * s * m.x[0] + v[1] * s * m.y[0] + v[2] * s * m.z[0];
+    const wy = pos[1] + v[0] * s * m.x[1] + v[1] * s * m.y[1] + v[2] * s * m.z[1];
+    const wz = pos[2] + v[0] * s * m.x[2] + v[1] * s * m.y[2] + v[2] * s * m.z[2];
+    const scale = COBRA_FOV / Math.max(1, wz);
+    return [cx + wx * scale, cy - wy * scale];
+  });
+  const visible = model.faces.map(n => {
+    const nx = n[0] * m.x[0] + n[1] * m.y[0] + n[2] * m.z[0];
+    const ny = n[0] * m.x[1] + n[1] * m.y[1] + n[2] * m.z[1];
+    const nz = n[0] * m.x[2] + n[1] * m.y[2] + n[2] * m.z[2];
+    return (pos[0] * nx + pos[1] * ny + pos[2] * nz) < 0;
+  });
+  cobraCtx.strokeStyle = color;
+  cobraCtx.lineWidth = lw;
+  cobraCtx.beginPath();
+  for (const [v1, v2, f1, f2] of model.edges) {
+    if (visible[f1] || visible[f2]) {
+      cobraCtx.moveTo(proj[v1][0], proj[v1][1]);
+      cobraCtx.lineTo(proj[v2][0], proj[v2][1]);
+    }
+  }
+  cobraCtx.stroke();
+  cobraCtx.lineWidth = 1;
+}
+
+const cobraCanvas = document.getElementById("cobra");
+const cobraCtx = cobraCanvas.getContext("2d");
+
+// Звёздное поле для фона.
+const cobraStars = Array.from({ length: 90 }, () => [
+  (Math.random() - 0.5) * 1400,
+  (Math.random() - 0.5) * 1400,
+  Math.random() * 1400 + 50
+]);
+
+// Параметры модели: позиция перед камерой + матрица поворота.
+const cobraShip = {
+  pos: [0, 0, 360],
+  rot: { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] },
+  yaw: 0,    // вокруг мировой Y
+  pitch: 0.12 // лёгкий наклон, чтобы было видно «сверху-сбоку»
+};
+tidyMatrix(cobraShip.rot);
+
+const COBRA_FOV = 480;
+
+// FPS-счётчик для 3D-вида
+let cobraFps = 0;
+let cobraFrames = 0;
+let cobraFpsLast = performance.now();
+
+// Режим 3D-вида: "orbit" (Cobra) | "undock"/"dock" (прямоугольники) | "cabin" | "planet_orbit"
+let cobraMode = "orbit";
+let cobraUndockStart = 0;      // performance.now() старта анимации
+let cobraAfterUndock = "cabin"; // режим после завершения undock-анимации ("cabin" | "planet_orbit")
+const COBRA_UNDOCK_DUR = 1.8;  // сек
+
+// Стыковка со станцией: |дистанция| <= COBRA_DOCK_DIST И «попадание» относительно
+// центра (вбок + по высоте) <= COBRA_DOCK_HIT → анимация стыковки (ТА ЖЕ, что на
+// старте/undock); по её завершении сброс позиции и скорости игрока — и снова полёт.
+let cobraDockStart = 0;        // performance.now() старта анимации стыковки
+const COBRA_DOCK_DUR = 1.8;    // сек (как undock)
+const COBRA_DOCK_DIST = 5;     // запуск анимации стыковки при дистанции <= 5
+const COBRA_DOCK_HIT  = 0.1;   // допуск попадания относительно центра станции (жёсткий)
+
+// Звёзды для вида из кабины (формула из ship.html)
+const cabinStars = Array.from({ length: 120 }, () => [
+  (Math.random() - 0.5) * 1600,
+  (Math.random() - 0.5) * 1600,
+  Math.random() * 1600 + 50
+]);
+let cabinSpeed = 6;
+let cameraYaw = 0; // Угол обзора (0 = север, положительный = на восток)
+const CABIN_FOV = 450;
+
+let cobraAltitude = 5;
+const COBRA_ALT_MIN = 1;    // минимальная высота
+const COBRA_ALT_MAX = 15;   // максимальная высота
+
+// planet_orbit: локальное состояние (не серверное, к карте системы отношения нет)
+let cobraPitchOffset = 0;   // наклон носа от R/F, 0 = база (автовозврат)
+let cobraLocalX = 0;        // локальные координаты, тор 1000x1000, центр в (0,0)
+let cobraLocalY = 0;
+const COBRA_PITCH_STEP  = 0.02;   // шаг наклона за кадр
+const COBRA_PITCH_MAX   = 0.30;   // предел наклона (рад)
+const COBRA_STRAFE_STEP = 0.05;   // шаг стрейфа за кадр (подберём, нужен объект)
+const COBRA_LOCAL_SIZE  = 1000;   // тор 1000x1000, закольцовано; координаты в −500..+500
+
+// Тор-обёртка: координата → диапазон −SIZE/2 .. +SIZE/2. Шов — на ±500, а НЕ на нуле:
+// старт (0,0) и станция (0,75) далеко от шва — «чуть сместиться влево от нуля»
+// больше ничего не ломает (x станет −0.5, без скачка через шов).
+function cobraWrap(v) {
+  return ((v + COBRA_LOCAL_SIZE / 2) % COBRA_LOCAL_SIZE + COBRA_LOCAL_SIZE) % COBRA_LOCAL_SIZE
+       - COBRA_LOCAL_SIZE / 2;
+}
+
+// Скорость полёта 0..10: Z (+1), X (−1), C (стоп). Дискретно, по нажатию клавиши.
+let cobraSpeed = 0;
+const COBRA_SPEED_MAX = 10;
+const COBRA_STAR_K = 0.8;   // поток набегающих звёзд за кадр = cobraSpeed * K
+const COBRA_MOVE_K  = 0.02; // ход вперёд за кадр = cobraSpeed * K (локальный тор)
+
+function drawCobra() {
+  const W = cobraCanvas.width, H = cobraCanvas.height;
+  cobraCtx.fillStyle = "#000";
+  cobraCtx.fillRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2;
+
+  // Звёзды (медленно дрейфуют для атмосферы).
+  cobraCtx.fillStyle = "#888";
+  for (const s of cobraStars) {
+    if (s[2] <= 1) continue;
+    const sx = cx + (s[0] * COBRA_FOV) / s[2];
+    const sy = cy - (s[1] * COBRA_FOV) / s[2];
+    if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+    const size = Math.max(1, (1 - s[2] / 1400) * 2);
+    cobraCtx.fillRect(sx, sy, size, size);
+  }
+
+  // Применяем мировой поворот к матрице модели: yaw вокруг Y, затем фиксированный pitch вокруг X.
+  const yaw = cobraShip.yaw, pitch = cobraShip.pitch;
+  const rx = rotVecY([1, 0, 0], yaw), ry = rotVecY([0, 1, 0], yaw), rz = rotVecY([0, 0, 1], yaw);
+  const mx = rotVecX(rx, pitch), my = rotVecX(ry, pitch), mz = rotVecX(rz, pitch);
+  const m = { x: mx, y: my, z: mz };
+
+  const pos = cobraShip.pos;
+  if (pos[2] <= 20) return;
+
+  if (cobraMode === "orbit") {
+    // Coriolis-станция на фоне, за коброй (рисуем первой — она дальше).
+    // Наводка строго на камеру: торец со слотом смотрит в центр экрана.
+    const stYaw = Math.atan2(-cobraStation.pos[0], -cobraStation.pos[2]);
+    const stPitch = Math.atan2(-cobraStation.pos[1], cobraStation.pos[2]);
+    drawEliteModel(CORIOLIS, cobraStation.pos, stYaw, stPitch, cobraStation.roll, "#00cc88", 1.2);
+
+    const projected = COBRA_MK3.vertices.map(v => {
+      const wx = pos[0] + v[0] * COBRA_MK3.scale * m.x[0] + v[1] * COBRA_MK3.scale * m.y[0] + v[2] * COBRA_MK3.scale * m.z[0];
+      const wy = pos[1] + v[0] * COBRA_MK3.scale * m.x[1] + v[1] * COBRA_MK3.scale * m.y[1] + v[2] * COBRA_MK3.scale * m.z[1];
+      const wz = pos[2] + v[0] * COBRA_MK3.scale * m.x[2] + v[1] * COBRA_MK3.scale * m.y[2] + v[2] * COBRA_MK3.scale * m.z[2];
+      const scale = COBRA_FOV / Math.max(1, wz);
+      return [cx + wx * scale, cy - wy * scale];
+    });
+
+    const faceVisible = COBRA_MK3.faces.map(n => {
+      const nx = n[0] * m.x[0] + n[1] * m.y[0] + n[2] * m.z[0];
+      const ny = n[0] * m.x[1] + n[1] * m.y[1] + n[2] * m.z[1];
+      const nz = n[0] * m.x[2] + n[1] * m.y[2] + n[2] * m.z[2];
+      const dot = pos[0] * nx + pos[1] * ny + pos[2] * nz;
+      return dot < 0;
+    });
+
+    cobraCtx.strokeStyle = "#00ff88";
+    cobraCtx.lineWidth = 1.4;
+    cobraCtx.beginPath();
+    for (const [v1, v2, f1, f2] of COBRA_MK3.edges) {
+      if (faceVisible[f1] || faceVisible[f2]) {
+        cobraCtx.moveTo(projected[v1][0], projected[v1][1]);
+        cobraCtx.lineTo(projected[v2][0], projected[v2][1]);
+      }
+    }
+    cobraCtx.stroke();
+  } else if (cobraMode === "undock") {
+    // Анимация отстыковки: 12 прямоугольников, 2^n
+    const t = Math.min(1, (performance.now() - cobraUndockStart) / 1000 / COBRA_UNDOCK_DUR);
+    cobraCtx.strokeStyle = "#00ff88";
+    cobraCtx.lineWidth = 1.5;
+    for (let n = 0; n < 12; n++) {
+      // 2^n: дальние — реже, ближние — чаще; к концу — «разлетаются» от центра
+      const base = Math.pow(2, n) * 0.5;
+      const dist = base * (0.2 + t * 1.8); // растёт со временем → «набегают»
+      const w = Math.max(4, dist * 0.6);
+      const h = Math.max(3, dist * 0.4);
+      cobraCtx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+    }
+  } else if (cobraMode === "dock") {
+    // Анимация стыковки — ТА ЖЕ, что на старте (undock): 12 прямоугольников 2^n
+    const t = Math.min(1, (performance.now() - cobraDockStart) / 1000 / COBRA_DOCK_DUR);
+    cobraCtx.strokeStyle = "#00ff88";
+    cobraCtx.lineWidth = 1.5;
+    for (let n = 0; n < 12; n++) {
+      // 2^n: дальние — реже, ближние — чаще; к концу — «разлетаются» от центра
+      const base = Math.pow(2, n) * 0.5;
+      const dist = base * (0.2 + t * 1.8); // растёт со временем → «набегают»
+      const w = Math.max(4, dist * 0.6);
+      const h = Math.max(3, dist * 0.4);
+      cobraCtx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+    }
+    cobraCtx.fillStyle = "#aaa";
+    cobraCtx.font = "11px monospace";
+    cobraCtx.textAlign = "center";
+    cobraCtx.textBaseline = "top";
+    cobraCtx.fillText("docking...", cx, 24);
+    cobraCtx.textAlign = "left";
+  } else {
+    // cabin: набегающие звёзды (фоновый параллакс)
+    cobraCtx.fillStyle = "#aaaaaa";
+    for (const [x, y, z] of cabinStars) {
+      if (z <= 1) continue;
+      const sx = cx + (x * CABIN_FOV) / z;
+      const sy = cy - (y * CABIN_FOV) / z;
+      if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+      const size = Math.max(1, (1 - z / 1600) * 2.5);
+      cobraCtx.fillRect(sx, sy, size, size);
+    }
+
+    // Реальные объекты системы — звезда + планеты + чужие корабли + маркер цели.
+    // Проекция: 2D мировые координаты → 3D cabine. Направление взгляда = курс движения.
+    if (sysData && shipData) {
+      const spx = shipData.pos.X, spy = shipData.pos.Y;
+
+      // Курс движения: к target если есть, иначе — к звезде (0,0).
+      let dx = -spx, dy = -spy;
+      if (shipData.target) { dx = shipData.target.X - spx; dy = shipData.target.Y - spy; }
+      const dlen = Math.hypot(dx, dy);
+      if (dlen < 1e-4) { dx = 1; dy = 0; } else { dx /= dlen; dy /= dlen; }
+
+      // Горизонт чуть ниже центра экрана (камера слегка смотрит вниз).
+      const horizonY = cy + 40;
+
+      function project(objX, objY) {
+        const rx = objX - spx, ry = objY - spy;
+        const forward = rx * dx + ry * dy;       // вдоль взгляда
+        const side    = ry * dx - rx * dy;       // перпендикулярно (правый борт; canvas Y вниз)
+        if (forward < 0.05) return null;          // позади камеры или слишком близко
+        const screenX = cx + (side * CABIN_FOV) / forward;
+        return { x: screenX, y: horizonY, forward };
+      }
+
+      // Звезда системы (большой жёлтый диск с glow).
+      const sp = project(0, 0);
+      if (sp) {
+        const r = Math.max(4, 30 / sp.forward);
+        const grad = cobraCtx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, r * 5);
+        grad.addColorStop(0,   "rgba(255,247,160,1)");
+        grad.addColorStop(0.18,"rgba(255,200,80,0.9)");
+        grad.addColorStop(0.45,"rgba(201,162,39,0.45)");
+        grad.addColorStop(1,   "rgba(201,162,39,0)");
+        cobraCtx.fillStyle = grad;
+        cobraCtx.fillRect(sp.x - r*5, sp.y - r*5, r*10, r*10);
+        cobraCtx.beginPath();
+        cobraCtx.arc(sp.x, sp.y, r, 0, Math.PI*2);
+        cobraCtx.fillStyle = "#fff7a0";
+        cobraCtx.fill();
+      }
+
+      // Планеты на орбитах (позиция зависит от worldDay — движутся раз в день).
+      for (const p of sysData.planets) {
+        const pos = getPlanetPosJS(p, worldDay, sysData.starId);
+        const pp = project(pos.x, pos.y);
+        if (!pp) continue;
+        const r = Math.max(1.5, 10 / pp.forward);
+        let color = "#888";
+        if (p.habitable && p.race >= 0 && p.race < 5) color = PLANET_COLORS[p.race];
+        cobraCtx.beginPath();
+        cobraCtx.arc(pp.x, pp.y, r, 0, Math.PI*2);
+        cobraCtx.fillStyle = color;
+        cobraCtx.fill();
+        // Подпись для близких планет.
+        if (pp.forward < 5 && r > 3) {
+          cobraCtx.fillStyle = "#aaa";
+          cobraCtx.font = "10px monospace";
+          cobraCtx.textAlign = "center";
+          cobraCtx.textBaseline = "top";
+          cobraCtx.fillText("p" + p.id, pp.x, pp.y + r + 4);
+          cobraCtx.textAlign = "left";
+        }
+      }
+
+      // Чужие корабли в системе — оранжевые точки.
+      for (const sh of otherShips) {
+        if (sh.shipId === shipData.shipId) continue;
+        const op = project(sh.pos.X, sh.pos.Y);
+        if (!op) continue;
+        const r = Math.max(1, 4 / op.forward);
+        cobraCtx.beginPath();
+        cobraCtx.arc(op.x, op.y, r, 0, Math.PI*2);
+        cobraCtx.fillStyle = "#fc6";
+        cobraCtx.fill();
+      }
+
+      // Маркер цели (если есть shipData.target).
+      if (shipData.target) {
+        const tp = project(shipData.target.X, shipData.target.Y);
+        if (tp) {
+          cobraCtx.strokeStyle = "#0f8";
+          cobraCtx.lineWidth = 1;
+          cobraCtx.beginPath();
+          cobraCtx.arc(tp.x, tp.y, 8, 0, Math.PI*2);
+          cobraCtx.stroke();
+          cobraCtx.beginPath();
+          cobraCtx.moveTo(tp.x - 12, tp.y); cobraCtx.lineTo(tp.x - 4, tp.y);
+          cobraCtx.moveTo(tp.x + 4, tp.y);  cobraCtx.lineTo(tp.x + 12, tp.y);
+          cobraCtx.moveTo(tp.x, tp.y - 12); cobraCtx.lineTo(tp.x, tp.y - 4);
+          cobraCtx.moveTo(tp.x, tp.y + 4);  cobraCtx.lineTo(tp.x, tp.y + 12);
+          cobraCtx.stroke();
+        }
+      }
+
+      // Линия горизонта (тонкая, для ориентации).
+        //cobraCtx.strokeStyle = "rgba(60,60,60,0.5)";
+        //cobraCtx.lineWidth = 1;
+        //cobraCtx.beginPath();
+        //cobraCtx.moveTo(0, horizonY); cobraCtx.lineTo(W, horizonY);
+        //cobraCtx.stroke();
+    }
+  }
+
+  // === planet_orbit: орбитальный полёт — планета внизу, кобра в центре, орбита-эллипс ===
+  if (cobraMode === "planet_orbit") {
+    // 1. Фон: звёзды
+    cobraCtx.fillStyle = "#888";
+    for (const s of cabinStars) {
+      if (s[2] <= 1) continue;
+      const sx = cx + (s[0] * CABIN_FOV) / s[2];
+      const sy = cy - (s[1] * CABIN_FOV) / s[2];
+      if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+      const size = Math.max(1, (1 - s[2] / 1600) * 2);
+      cobraCtx.fillRect(sx, sy, size, size);
+    }
+
+    // 2. Планета внизу (эллипс-горизонт, только контур)
+    let planetColor = "#55c855";
+    if (selected && selected.kind === "planet" && sysData) {
+      const p = sysData.planets.find(pp => pp.id === selected.id);
+      if (p && p.habitable && p.race >= 0 && p.race < 5) planetColor = PLANET_COLORS[p.race];
+    } else if (sysData && planet) {
+      const p = sysData.planets.find(pp => pp.id === planet.id);
+      if (p && p.habitable && p.race >= 0 && p.race < 5) planetColor = PLANET_COLORS[p.race];
+    }
+
+    const horizonRy = H * 0.30;
+    const horizonY = H + horizonRy * 0.5;
+    const horizonRx = W * 0.55;
+    // Без заливки: только контур эллипса на полу (цвет — цвет планеты).
+    cobraCtx.strokeStyle = planetColor;
+    cobraCtx.lineWidth = 1.5;
+    cobraCtx.beginPath();
+    cobraCtx.ellipse(cx, horizonY, horizonRx, horizonRy, 0, 0, Math.PI*2);
+    cobraCtx.stroke();
+    cobraCtx.lineWidth = 1;
+
+    // 3. Два эллипса (орбиты/эклиптика)
+    const rX = W * 0.60; // радиус по X
+    const rY = H * 0.15; // радиус по Y (сплющенность)
+    const offsetY = H * 0.0; // сдвиг эллипсов от центра
+        
+        const compassShiftY = 220; // <-- сдвиг только компаса (Солнце, Луна, планеты) вниз
+
+    // Северный эллипс (верхняя половина)
+  //  cobraCtx.beginPath();
+  //  cobraCtx.ellipse(cx, cy + offsetY, rX, rY, 0, Math.PI, Math.PI * 2);
+  //  cobraCtx.strokeStyle = "rgba(100, 150, 255, 0.3)"; // Синеватый
+  //  cobraCtx.lineWidth = 1;
+  //  cobraCtx.stroke();
+
+    // Южный эллипс (нижняя половина)
+ //   cobraCtx.beginPath();
+ //   cobraCtx.ellipse(cx, cy - offsetY, rX, rY, 0, 0, Math.PI);
+ //   cobraCtx.strokeStyle = "rgba(100, 150, 255, 0.3)";
+ //   cobraCtx.lineWidth = 1;
+ //   cobraCtx.stroke();
+
+    // 4. Солнце (Север) — смещается при повороте
+    const sunAngle = -Math.PI / 2 - cameraYaw;
+    const sunX = cx + rX * Math.cos(sunAngle);
+    const sunY = (cy + offsetY + compassShiftY + cobraAltitude) + rY * Math.sin(sunAngle);
+    // (код отрисовки SunGrad остается без изменений)
+    const sunGrad = cobraCtx.createRadialGradient(sunX, sunY, 0, sunX, sunY, 20);
+    sunGrad.addColorStop(0, "#fff7a0");
+    sunGrad.addColorStop(0.5, "#ffcc00");
+    sunGrad.addColorStop(1, "rgba(255, 200, 80, 0)");
+    cobraCtx.fillStyle = sunGrad;
+    cobraCtx.beginPath(); cobraCtx.arc(sunX, sunY, 20, 0, Math.PI*2); cobraCtx.fill();
+    cobraCtx.fillStyle = "#fff"; cobraCtx.beginPath(); cobraCtx.arc(sunX, sunY, 4, 0, Math.PI*2); cobraCtx.fill();
+
+    // 5. Луна (Юг) — смещается в противоположную сторону
+    const moonAngle = Math.PI / 2 - cameraYaw;
+    const moonX = cx + rX * Math.cos(moonAngle);
+    const moonY = (cy - offsetY + compassShiftY + cobraAltitude) + rY * Math.sin(moonAngle);
+    // (код отрисовки Луны остается без изменений)
+    cobraCtx.fillStyle = "#ccc"; 
+    cobraCtx.beginPath(); cobraCtx.arc(moonX, moonY, 6, 0, Math.PI*2); cobraCtx.fill();
+    // Тёмная сторона луны (полумесяц)
+    cobraCtx.fillStyle = "#444"; 
+    cobraCtx.beginPath(); cobraCtx.arc(moonX - 2, moonY - 1, 6, 0, Math.PI*2); cobraCtx.fill();
+    cobraCtx.fillStyle = "#ccc"; 
+    cobraCtx.beginPath(); cobraCtx.arc(moonX + 1, moonY + 1, 5, 0, Math.PI*2); cobraCtx.fill();
+
+    // 5.5 Станция на компасе: метка-ромб на СВОЁМ невидимом эллипсе (трек целиком
+    // в кадре при любом пеленге — трек Солнце/Луна уходит за экран сбоку и снизу).
+    // Пеленг на станцию (кратчайший путь тора) → угол на эллипсе:
+    // прямо по курсу — верх, сзади — низ (как у планет: «впереди = верхняя половина»).
+    {
+      const svC = cobraStationVec();
+      const stRx = W * 0.42, stRy = H * 0.14;           // свой эллипс метки: весь в кадре
+      const stBase = cy + compassShiftY * 0.5 + cobraAltitude; // центр трека (дышит с Alt)
+      const stAng = -Math.PI / 2 + Math.atan2(svC.side, svC.fwd);
+      const stMX = cx + stRx * Math.cos(stAng);
+      const stMY = stBase + stRy * Math.sin(stAng);
+      const stAhead = Math.sin(stAng) < 0; // впереди = верхняя половина (как у планет)
+      cobraCtx.globalAlpha = stAhead ? 1 : 0.35;
+      cobraCtx.strokeStyle = "#00cc88";
+      cobraCtx.beginPath(); // ромб — только линии, без заливки
+      cobraCtx.moveTo(stMX, stMY - 5);
+      cobraCtx.lineTo(stMX + 5, stMY);
+      cobraCtx.lineTo(stMX, stMY + 5);
+      cobraCtx.lineTo(stMX - 5, stMY);
+      cobraCtx.closePath();
+      cobraCtx.stroke();
+      if (stAhead) {
+        cobraCtx.fillStyle = "#00cc88";
+        cobraCtx.font = "9px monospace";
+        cobraCtx.textAlign = "center";
+        cobraCtx.fillText("st " + Math.hypot(svC.fwd, svC.side).toFixed(1), stMX, stMY - 8);
+        cobraCtx.textAlign = "left";
+      }
+      cobraCtx.globalAlpha = 1;
+    }
+
+    // 6. Проекция карты системы: звезда = север, планеты по реальным орбитам.
+    // Корабль «стоит» на домашней планете; серверные координаты не трогаем —
+    // всё считается локально из sysData (формула орбит + worldDay).
+    if (sysData && sysData.planets.length > 0) {
+      const homeP = sysData.planets.find(pp => pp.id === planetID) || sysData.planets[0];
+      const shipPos = getPlanetPosJS(homeP, worldDay, sysData.starId);
+      const angStar = Math.atan2(-shipPos.y, -shipPos.x); // направление на звезду
+      const compY = (cy + offsetY + compassShiftY + cobraAltitude);
+      const prX = W * 0.44; // чуть уже эллипса компаса — все планеты остаются в кадре
+
+      for (const p of sysData.planets) {
+        if (p.id === homeP.id) continue; // своя планета — под ногами (горизонт внизу)
+        const op = getPlanetPosJS(p, worldDay, sysData.starId);
+        const dist = Math.hypot(op.x - shipPos.x, op.y - shipPos.y);
+        if (dist < 0.01) continue;
+        // Пеленг планеты относительно направления на звезду (звезда = север)
+        let rel = Math.atan2(op.y - shipPos.y, op.x - shipPos.x) - angStar;
+        rel = Math.atan2(Math.sin(rel), Math.cos(rel)); // нормализация -PI..PI
+        const screenAng = sunAngle + rel;
+        const px = cx + prX * Math.cos(screenAng);
+        const py = compY + rY * Math.sin(screenAng);
+
+        // Впереди = верхняя половина эллипса компаса — крупнее и ярче
+        const ahead = Math.sin(screenAng) < 0;
+        const r = Math.max(2, Math.min(6, 9 / dist)); // чем ближе, тем крупнее
+        let color = "#888";
+        if (p.habitable && p.race >= 0 && p.race < 5) color = PLANET_COLORS[p.race];
+
+        cobraCtx.globalAlpha = ahead ? 1 : 0.35;
+        cobraCtx.fillStyle = color;
+        cobraCtx.beginPath();
+        cobraCtx.arc(px, py, ahead ? r : Math.max(1.5, r * 0.6), 0, Math.PI*2);
+        cobraCtx.fill();
+        // Выбранная планета (set на карте) — белое кольцо
+        if (selected && selected.kind === "planet" && selected.id === p.id) {
+          cobraCtx.strokeStyle = "#fff";
+          cobraCtx.lineWidth = 1.5;
+          cobraCtx.beginPath();
+          cobraCtx.arc(px, py, r + 3.5, 0, Math.PI*2);
+          cobraCtx.stroke();
+          cobraCtx.lineWidth = 1;
+        }
+        if (ahead) {
+          cobraCtx.fillStyle = "#aaa";
+          cobraCtx.font = "9px monospace";
+          cobraCtx.textAlign = "center";
+          cobraCtx.textBaseline = "top";
+          cobraCtx.fillText("p" + p.id + " " + dist.toFixed(1), px, py + r + 3);
+          cobraCtx.textAlign = "left";
+        }
+        cobraCtx.globalAlpha = 1;
+      }
+    }
+
+    // 6.5 Станция на сетке (тор 1000x1000): фиксированная ячейка, размер от дистанции.
+    // «Камерные» координаты: side — вбок, fwd — вперёд по курсу камеры.
+    // Вектор — по кратчайшему пути тора: видна сразу со старта (d=75) и до FAR=150.
+    {
+      const sv = cobraStationVec();
+      const fwd = sv.fwd, side = sv.side;
+      if (fwd >= COBRA_STATION_NEAR && fwd <= COBRA_STATION_FAR) {
+        // Высота: уровень взгляда (cy) с поправкой по Alt — набор высоты (W) опускает
+        // станцию на экране вниз, снижение (S) поднимает, 1 ед. alt = 1 px (как у компаса).
+        // Ориентация: yaw/pitch считаются из позиции станции — торец со слотом ВСЕГДА
+        // смотрит строго в центр камеры (roll продолжает крутить слот на месте).
+        // stHalf — полувысота каркаса (сечение — квадрат с полу-стороной 160):
+        // 160*(|sin|+|cos|) roll — нужна только для позиции подписи над каркасом.
+        const stHalf = 160 * CORIOLIS.scale
+                     * (Math.abs(Math.sin(cobraStation.roll)) + Math.abs(Math.cos(cobraStation.roll)))
+                     * COBRA_FOV / fwd;
+        const stY = cy + cobraAltitude * COBRA_STATION_ALT_PX; // центр: линия взгляда + поправка по Alt
+        const stWy = sv.vert;
+        const stX = cx + side * COBRA_FOV / fwd;
+        const stYaw = Math.atan2(-side, -fwd);   // наводка на камеру: горизонталь
+        const stPitch = Math.atan2(-stWy, fwd);  // ... и вертикаль
+        drawEliteModel(CORIOLIS, [side, stWy, fwd],
+                       stYaw, stPitch, cobraStation.roll, "#00cc88", 1.2);
+        // подпись с дистанцией (только текст, без эффектов)
+        cobraCtx.fillStyle = "#aaa";
+        cobraCtx.font = "9px monospace";
+        cobraCtx.textAlign = "center";
+        cobraCtx.fillText("station  d=" + fwd.toFixed(1), stX, stY - stHalf - 6);
+        cobraCtx.textAlign = "left";
+      }
+    }
+
+    // 7. Кобра (сзади, чуть сверху) — K прячет/показывает
+    if (cobraShipVisible) {
+    const yaw = 0; // Сзади
+    const pitch = -0.25 + cobraPitchOffset; // Сверху + наклон носа (R/F)
+    const rx = rotVecY([1, 0, 0], yaw), ry = rotVecY([0, 1, 0], yaw), rz = rotVecY([0, 0, 1], yaw);
+    const mx = rotVecX(rx, pitch), my = rotVecX(ry, pitch), mz = rotVecX(rz, pitch);
+    const m = { x: mx, y: my, z: mz };
+    const shipCy = H * 0.65; // Кобра по центру, чуть ниже
+    const pos = cobraShip.pos;
+    const projected = COBRA_MK3.vertices.map(v => {
+      const wx = pos[0] + v[0] * COBRA_MK3.scale * m.x[0] + v[1] * COBRA_MK3.scale * m.y[0] + v[2] * COBRA_MK3.scale * m.z[0];
+      const wy = pos[1] + v[0] * COBRA_MK3.scale * m.x[1] + v[1] * COBRA_MK3.scale * m.y[1] + v[2] * COBRA_MK3.scale * m.z[1];
+      const wz = pos[2] + v[0] * COBRA_MK3.scale * m.x[2] + v[1] * COBRA_MK3.scale * m.y[2] + v[2] * COBRA_MK3.scale * m.z[2];
+      const scale = COBRA_FOV / Math.max(1, wz);
+      return [cx + wx * scale, shipCy - wy * scale];
+    });
+    const faceVisible = COBRA_MK3.faces.map(n => {
+      const nx = n[0] * m.x[0] + n[1] * m.y[0] + n[2] * m.z[0];
+      const ny = n[0] * m.x[1] + n[1] * m.y[1] + n[2] * m.z[1];
+      const nz = n[0] * m.x[2] + n[1] * m.y[2] + n[2] * m.z[2];
+      const dot = pos[0] * nx + pos[1] * ny + pos[2] * nz;
+      return dot < 0;
+    });
+    cobraCtx.strokeStyle = "#00ff88";
+    cobraCtx.lineWidth = 1.4;
+    cobraCtx.beginPath();
+    for (const [v1, v2, f1, f2] of COBRA_MK3.edges) {
+      if (faceVisible[f1] || faceVisible[f2]) {
+        cobraCtx.moveTo(projected[v1][0], projected[v1][1]);
+        cobraCtx.lineTo(projected[v2][0], projected[v2][1]);
+      }
+    }
+    cobraCtx.stroke();
+    } // cobraShipVisible
+  }
+
+  // Лёгкая телеметрия: если у нас есть свой корабль — покажем.
+  if (shipData) {
+    cobraCtx.fillStyle = "#888";
+    cobraCtx.font = "11px monospace";
+    cobraCtx.textAlign = "left";
+    cobraCtx.textBaseline = "top";
+    cobraCtx.fillText(
+      "ship=" + shipData.shipId +
+      " pos=(" + shipData.pos.X.toFixed(2) + "," + shipData.pos.Y.toFixed(2) + ")" +
+      " eta=" + shipData.eta,
+      8, 8
+    );
+  }
+
+  // Отладка planet_orbit: все локальные переменные столбиком под "ship=..."
+  {
+    const dbg = [
+      "mode=" + cobraMode,
+      "spd=" + cobraSpeed + " / " + COBRA_SPEED_MAX + "  (Z+ X- C=0)",
+      "yaw=" + cameraYaw.toFixed(3),
+      "alt=" + cobraAltitude.toFixed(0) + " (1..15  W/S)",
+      "pitch=" + cobraPitchOffset.toFixed(3),
+      "localX=" + cobraLocalX.toFixed(2),
+      "localY=" + cobraLocalY.toFixed(2),
+      "shipYaw=" + cobraShip.yaw.toFixed(2),
+      "shipPitch=" + cobraShip.pitch.toFixed(2),
+      "cobra(K)=" + (cobraShipVisible ? "on" : "off"),
+    ];
+    // Наводка на станцию: d — дистанция по курсу, hit — промах от центра.
+    // Стыковка: d<=5 и hit<=0.1.
+    if (cobraMode === "planet_orbit" || cobraMode === "dock") {
+      const sv = cobraStationVec();
+      dbg.push("st d=" + sv.fwd.toFixed(1) + " hit=" + Math.hypot(sv.side, sv.vert).toFixed(2) + "  (dock: d<=5 & hit<=0.1)");
+    }
+    cobraCtx.fillStyle = "#888";
+    cobraCtx.font = "11px monospace";
+    cobraCtx.textAlign = "left";
+    cobraCtx.textBaseline = "top";
+    for (let i = 0; i < dbg.length; i++) {
+      cobraCtx.fillText(dbg[i], 8, 24 + i * 13);
+    }
+  }
+
+  // FPS — правый верхний угол
+  cobraCtx.fillStyle = "#00ff88";
+  cobraCtx.font = "12px monospace";
+  cobraCtx.textAlign = "right";
+  cobraCtx.textBaseline = "top";
+  cobraCtx.fillText("fps=" + cobraFps, W - 8, 8);
+  cobraCtx.textAlign = "left";
+
+  // Благодарность — внизу по центру, с миганием как "Press Space, Commander"
+  if (Math.floor(performance.now() / 1800) % 2 === 0) {
+    cobraCtx.fillStyle = "#2a7a4a";
+    cobraCtx.font = "12px monospace";
+    cobraCtx.textAlign = "center";
+    cobraCtx.textBaseline = "bottom";
+    cobraCtx.fillText("inspired by ELITE (1984) — D. Braben & I. Bell", W / 2, H - 10);
+    cobraCtx.textAlign = "left";
+    cobraCtx.textBaseline = "top";
+  }
+}
+
+function cobraLoop() {
+  if (cobraMode === "orbit") {
+    cobraShip.yaw   += 0.012;
+    cobraShip.pitch += 0.0045;
+    cobraStation.roll += 0.004; // станция вращается вокруг собственной оси Z — слот крутится на месте
+  } else if (cobraMode === "undock") {
+    const elapsed = (performance.now() - cobraUndockStart) / 1000;
+    if (elapsed >= COBRA_UNDOCK_DUR) {
+      cobraMode = cobraAfterUndock; // отстыковка закончилась → cabin или planet_orbit
+      cobraAfterUndock = "cabin";    // сброс
+      if (cobraMode === "cabin") {
+        for (const s of cabinStars) {
+          s[0] = (Math.random() - 0.5) * 1600;
+          s[1] = (Math.random() - 0.5) * 1600;
+          s[2] = Math.random() * 1600 + 50;
+        }
+      }
+    }
+  } else if (cobraMode === "dock") {
+    const elapsed = (performance.now() - cobraDockStart) / 1000;
+    if (elapsed >= COBRA_DOCK_DUR) {
+      // Стыковка завершена: сброс позиции и скорости игрока — и снова полёт.
+      cobraMode = "planet_orbit";
+      cobraLocalX = 0;
+      cobraLocalY = 0;
+      cobraSpeed = 0;
+      cobraPitchOffset = 0;
+    }
+  } else if (cobraMode === "planet_orbit") {
+    cobraStation.roll += 0.004; // станция крутится вокруг своей оси и в демке на сетке
+    // Вращение обзора (камеры) по Q/E
+    if (keys['KeyE']) cameraYaw += 0.01; // Вправо (Восток)
+    if (keys['KeyQ']) cameraYaw -= 0.01; // Влево (Запад)
+        
+        if (keys['KeyW']) cobraAltitude += 1; // вверх
+    if (keys['KeyS']) cobraAltitude -= 1; // вниз
+    // Ограничение высоты 1..15
+    if (cobraAltitude < COBRA_ALT_MIN) cobraAltitude = COBRA_ALT_MIN;
+    if (cobraAltitude > COBRA_ALT_MAX) cobraAltitude = COBRA_ALT_MAX;
+
+    // Pitch: R — нос вверх, F — вниз; отпустил — плавный возврат к базе (по кадру).
+    if (keys['KeyR']) cobraPitchOffset += COBRA_PITCH_STEP;
+    if (keys['KeyF']) cobraPitchOffset -= COBRA_PITCH_STEP;
+    if (!keys['KeyR'] && !keys['KeyF']) {
+      const back = COBRA_PITCH_STEP * 1.5;   // возврат чуть быстрее наклона
+      if (Math.abs(cobraPitchOffset) <= back) cobraPitchOffset = 0;
+      else cobraPitchOffset -= Math.sign(cobraPitchOffset) * back;
+    }
+    if (cobraPitchOffset >  COBRA_PITCH_MAX) cobraPitchOffset =  COBRA_PITCH_MAX;
+    if (cobraPitchOffset < -COBRA_PITCH_MAX) cobraPitchOffset = -COBRA_PITCH_MAX;
+
+    // Стрейф A/D относительно текущего поворота камеры. Пока без визуала.
+    if (keys['KeyD'] || keys['KeyA']) {
+      const dir = keys['KeyD'] ? 1 : -1;
+      cobraLocalX += Math.cos(cameraYaw) * COBRA_STRAFE_STEP * dir;
+      cobraLocalY -= Math.sin(cameraYaw) * COBRA_STRAFE_STEP * dir;
+      cobraLocalX = cobraWrap(cobraLocalX);
+      cobraLocalY = cobraWrap(cobraLocalY);
+    }
+        
+    // Ход вперёд со скоростью: по курсу камеры (север = +localY), тор 1000x1000
+    if (cobraSpeed > 0) {
+      cobraLocalX += Math.sin(cameraYaw) * COBRA_MOVE_K * cobraSpeed;
+      cobraLocalY += Math.cos(cameraYaw) * COBRA_MOVE_K * cobraSpeed;
+      cobraLocalX = cobraWrap(cobraLocalX);
+      cobraLocalY = cobraWrap(cobraLocalY);
+    }
+
+    // Стыковка: дистанция до станции <= 5 И «попадание» относительно центра <= 0.1
+    // (вбок + по высоте). Успех → анимация стыковки (как на старте); по её
+    // завершении — сброс позиции и скорости, снова полёт (ветка "dock" выше).
+    {
+      const sv = cobraStationVec();
+      if (Math.abs(sv.fwd) <= COBRA_DOCK_DIST && Math.hypot(sv.side, sv.vert) <= COBRA_DOCK_HIT) {
+        cobraMode = "dock";
+        cobraDockStart = performance.now();
+      }
+    }
+
+    // Набегающие звёзды: поток навстречу пропорционален скорости
+    if (cobraSpeed > 0) {
+      const flow = cobraSpeed * COBRA_STAR_K;
+      for (const s of cabinStars) {
+        s[2] -= flow;
+        if (s[2] < 10) {
+          s[0] = (Math.random() - 0.5) * 1600;
+          s[1] = (Math.random() - 0.5) * 1600;
+          s[2] = 1600;
+        }
+      }
+    }
+  } else {
+    // cabin: звёзды летят на камеру
+    for (const s of cabinStars) {
+      s[2] -= cabinSpeed;
+      if (s[2] < 10) {
+        s[0] = (Math.random() - 0.5) * 1600;
+        s[1] = (Math.random() - 0.5) * 1600;
+        s[2] = 1600;
+      }
+    }
+  }
+  drawCobra();
+
+  // FPS: считаем кадры, обновляем раз в ~500 мс
+  cobraFrames++;
+  const now = performance.now();
+  if (now - cobraFpsLast >= 500) {
+    cobraFps = Math.round(cobraFrames * 1000 / (now - cobraFpsLast));
+    cobraFrames = 0;
+    cobraFpsLast = now;
+  }
+
+  requestAnimationFrame(cobraLoop);
+}
+cobraLoop();
+
+
+// --- старт ---
+(async () => {
+  await loadPlanet();
+  buildRoomKeys();
+  updateTabsState();
+  switchRoom();
+  if (planet) await loadSystem(planet.star);
+  const sid = parseInt(localStorage.getItem("gs_ship_id") || "0", 10);
+  if (sid) await loadShip(sid);
+  pollShipByHour();          // <-- вместо pollDay()
+  pollShipsBySystem();
+  pollSystemObjects();       // корабли симуляции в системе (раз в игровой день)
+  setInterval(drawSysMap, 1000);
+})();
+</script>
+
+</body>
+</html>

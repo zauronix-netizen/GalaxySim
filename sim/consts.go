@@ -68,6 +68,76 @@ const InflationOff = true
 // Считаем от неё, чтобы сжатие/инфляция по возрасту галактики не накапливались.
 var GoodsMarketBase [GoodCount]GoodInfo = GoodsMarket
 
+// GoodTradedByNPC — какие товары берут в работу трейдеры и караваны.
+// false = товар живёт в экономике (производство, потребление, цены, склады,
+// легальность, станции), но NPC его не возят. Торговых — 32 из 38
+// (по числу часов в симуляции; потом удобно разложить на часы).
+var GoodTradedByNPC = [GoodCount]bool{
+	true,  // 0 Food
+	true,  // 1 Textiles
+	true,  // 2 Radioactives
+	false, // 3 Slaves
+	false,  // 4 LiquorWines
+	true,  // 5 Luxuries
+	false, // 6 Narcotics
+	true,  // 7 Computers
+	true,  // 8 Machinery
+	true,  // 9 Alloys
+	true,  // 10 Firearms
+	true,  // 11 Furs
+	true,  // 12 Minerals
+	false, // 13 Gold
+	false, // 14 Platinum
+	false, // 15 GemStones
+	false, // 16 AlienItems
+	true,  // 17 FerrousMetals
+	true,  // 18 Timber
+	true,  // 19 AirProcessors
+	true,  // 20 AnimalMeat
+	true,  // 21 AnimalSkins
+	true,  // 22 BattleWeapons
+	true,  // 23 FarmMachinery
+	true,  // 24 Fertilizer
+	true,  // 25 Grain
+	true,  // 26 Drone
+	true,  // 27 HeavyPlastics
+	true,  // 28 HydrogenFuel
+	true,  // 29 IndustrialParts
+	true,  // 30 LiquidOxygen
+	true,  // 31 LiveAnimals
+	true,  // 32 Medicines
+	true,  // 33 MilitaryFuel
+	true,  // 34 NerveGas
+	true,  // 35 Robots
+	true,  // 36 SyntheticMeat
+	true,  // 37 Water
+}
+
+// goodTraded — торгует ли NPC этим товаром.
+func goodTraded(g Good) bool { return GoodTradedByNPC[g] }
+
+// npcGoodOrder — перемешанный список только торгуемых NPC товаров.
+func (w *World) npcGoodOrder() []int {
+	order := make([]int, 0, GoodCount)
+	for g := 0; g < int(GoodCount); g++ {
+		if GoodTradedByNPC[g] {
+			order = append(order, g)
+		}
+	}
+	w.Rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	return order
+}
+
+// randomNpcGood — случайный торгуемый товар.
+func (w *World) randomNpcGood() Good {
+	for {
+		g := Good(w.Rng.Intn(int(GoodCount)))
+		if goodTraded(g) {
+			return g
+		}
+	}
+}
+
 // GoodsTextOrder — порядок вывода товаров в вебе, логах, lairs.
 // Сгруппировано: еда → сырьё → пром → топливо → роскошь → нелегалка → особые.
 var GoodsTextOrder = [GoodCount]int{

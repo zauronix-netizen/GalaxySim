@@ -150,7 +150,10 @@ var GovConsFactor = [GovCount][GoodCount]float64{
 
 // Применить производство/потребление к планете.
 // Вызывать в phaseEconomy, ДО UpdateMarketState.
-func (w *World) applyProduction(p *Planet) {
+// applyProd=true: применять и производство, и потребление (раз в 4 месяца).
+// applyProd=false: применять только потребление (раз в месяц).
+// Delta считается всегда (prod - cons), не зависит от applyProd.
+func (w *World) applyProduction(p *Planet, applyProd bool) {
 	if !p.Habitable {
 		return
 	}
@@ -163,13 +166,26 @@ func (w *World) applyProduction(p *Planet) {
 	if base < 1 {
 		base = 1
 	}
-
+	// Маски паттерна: сброс перед пересчётом (раз в 144 тика = 4 месяца).
+	// Сбрасываем только когда applyProd=true (каждые 4 месяца).
+	if applyProd {
+		p.ProducedMask = 0
+		p.ConsumedMask = 0
+	}
 	// --- Основное производство/потребление (раса × экономика × политика) ---
 	for g := 0; g < int(GoodCount); g++ {
 		m := &p.Market[g]
 		prod := rc.ProdCoef[g] * ecoP[g] * govP[g] * base
 		cons := rc.ConsCoef[g] * ecoC[g] * govC[g] * base
-
+		// Паттерн: производит / потребляет (без порога, prod == cons — ни туда, ни сюда).
+		// Маски обновляем только на производственном тике (applyProd=true).
+		if applyProd {
+			if prod > cons {
+				p.ProducedMask |= 1 << uint(g)
+			} else if cons > prod {
+				p.ConsumedMask |= 1 << uint(g)
+			}
+		}
 		// Бустер еды при голоде: порог тот же, что у новости (count < ts/5).
 		if g == int(GoodFood) {
 			tsFood := m.TargetStock
@@ -186,28 +202,39 @@ func (w *World) applyProduction(p *Planet) {
 			} */
 		}
 
-		// Для веба: сохраняем prod-cons (float) за этот тик — ДО изменения Count.
-
-			// ЭКСПЕРИМЕНТ: Delta = (prod-cons)/16 * TechLevel.
-			// Временно (TL=3 статичен). При росте TL и Pop-динамике — пересмотреть.
+		// Для веба: Delta = (prod-cons)/16 * TechLevel (нетто за 4 месяца).
+		// Считаем всегда для отображения, не зависит от applyProd.
 			tl := p.TechLevel
 			if tl < 1 {
 				tl = 1
 			}
-			d := (prod - cons) / 16.0 * float64(tl)
+			d := (prod - cons) / 32.0 * float64(tl)
 			m.Delta = d
-			delta := int(d)
 
-			//
-
-		if delta == 0 {
-			if d > 0 {
-				delta = 1
-			} else if d < 0 {
-				delta = -1
-			}
+		// Реальное изменение Count: раздельно потребление (месячно) и производство (каждые 4 месяца).
+		// Масштаб: /16 * TL — тот же, что для Delta.
+		consScaled := cons / 16.0 * float64(tl)
+		prodScaled := prod / 16.0 * float64(tl)
+		consInt := int(consScaled)
+		prodInt := int(prodScaled)
+		if consInt == 0 && consScaled > 0 {
+			consInt = 1
+		} else if consInt == 0 && consScaled < 0 {
+			consInt = -1
 		}
-		m.Count += delta
+		if prodInt == 0 && prodScaled > 0 {
+			prodInt = 1
+		} else if prodInt == 0 && prodScaled < 0 {
+			prodInt = -1
+		}
+
+		if applyProd {
+			// Каждые 4 месяца: и производство, и потребление
+			m.Count += prodInt - consInt
+		} else {
+			// Месячно: только потребление
+			m.Count -= consInt
+		}
 		if m.Count < 0 {
 			m.Count = 0
 		}
@@ -280,4 +307,25 @@ func (w *World) applyProduction(p *Planet) {
 		p.Economy == EcoAgriPoor || p.Economy == EcoAgriAvg {
 		addExtra(GoodMinerals, int(base*0.3))
 	}
+}
+
+// economyShift — случайная смена уровня экономики планеты (раз в год).
+// Категория (Agri/Mixed/Ind) не меняется, меняется только уровень (Poor/Avg/Rich).
+// Вызывается один раз в год (Day % 576 == 0) ДО applyProduction.
+func (w *World) economyShift(p *Planet) {
+	if !p.Habitable {
+		return
+	}
+	// ~5% шанс смены уровня в год
+	if w.Rng.Intn(100) >= 75 {
+		return
+	}
+	old := p.Economy
+	// Определяем категорию: 0=Agri(0-2), 1=Mixed(3-5), 2=Ind(6-8)
+	cat := int(p.Economy) / 3
+	// Внутри категории выбираем случайный уровень 0..2 (Poor/Avg/Rich)
+	level := w.Rng.Intn(3)
+	p.Economy = Economy(cat*3 + level)
+	// Логирование смены (можно убрать/заменить на event-систему)
+	_ = old // avoid unused if no logging
 }

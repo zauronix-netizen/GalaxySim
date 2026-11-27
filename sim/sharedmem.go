@@ -101,6 +101,11 @@ func (w *World) writeSnapshot() {
 	if starID < 0 || starID >= len(w.Stars) {
 		return
 	}
+	// Раз в день (2048 тиков), а не каждый тик.
+	if w.ShmDay == w.Day {
+		return
+	}
+	w.ShmDay = w.Day
 
 	snap := Snapshot{
 		Day:     w.Day,
@@ -144,4 +149,99 @@ func (w *World) traderInSystem(t *Trader, starID int) bool {
 		return t.RouteIdx >= 0 && t.RouteIdx < len(t.Route) && t.Route[t.RouteIdx] == starID
 	}
 	return false
+}
+
+// SysShip — корабль в системе для карты чата: где он и куда летит.
+type SysShip struct {
+	Kind  int     `json:"k"`  // 1 трейдер, 2 караван, 3 дипломат, 4 банкир, 5 пират
+	X     float64 `json:"x"`  // текущая позиция
+	Y     float64 `json:"y"`
+	TX    float64 `json:"tx"` // цель (точка встречи Безье)
+	TY    float64 `json:"ty"`
+	To    int     `json:"to"` // планета-цель (-1 = нет)
+	Phase int     `json:"ph"`
+}
+
+// caravanInSystem — караван сейчас в системе starID и его координаты валидны.
+func (w *World) caravanInSystem(c *Caravan, starID int) bool {
+	if !c.Alive || c.Flight.Len <= 0 {
+		return false
+	}
+	switch c.Phase {
+	case CaravanPhaseTakeoff, CaravanPhaseCruise, CaravanPhaseLanding,
+		CaravanPhaseToEdge, CaravanPhasePlanetToEdge,
+		CaravanPhaseRefuelApproach, CaravanPhaseRefuelLanding:
+		return c.FromPlanet >= 0 && w.Planets[c.FromPlanet].StarID == starID
+	case CaravanPhaseEdgeToPlanet:
+		return c.ToPlanet >= 0 && w.Planets[c.ToPlanet].StarID == starID
+	case CaravanPhaseEdgeToEdge:
+		return c.RouteIdx >= 0 && c.RouteIdx < len(c.Route) && c.Route[c.RouteIdx] == starID
+	}
+	return false
+}
+
+// diplomatInSystem — то же для дипломатов/банкиров (свои константы фаз).
+func (w *World) diplomatInSystem(d *Diplomat, starID int) bool {
+	if !d.Alive || d.Flight.Len <= 0 {
+		return false
+	}
+	switch d.Phase {
+	case DiplomatPhaseTakeoff, DiplomatPhaseCruise, DiplomatPhaseLanding,
+		DiplomatPhaseToEdge, DiplomatPhasePlanetToEdge,
+		DiplomatPhaseRefuelApproach, DiplomatPhaseRefuelLanding:
+		return d.FromPlanet >= 0 && w.Planets[d.FromPlanet].StarID == starID
+	case DiplomatPhaseEdgeToPlanet:
+		return d.ToPlanet >= 0 && w.Planets[d.ToPlanet].StarID == starID
+	case DiplomatPhaseEdgeToEdge:
+		return d.RouteIdx >= 0 && d.RouteIdx < len(d.Route) && d.Route[d.RouteIdx] == starID
+	}
+	return false
+}
+
+// MapShips — все корабли в системе для карты: позиция + цель.
+func (w *World) MapShips(starID int) []SysShip {
+	out := make([]SysShip, 0, 32)
+	if starID < 0 || starID >= len(w.Stars) {
+		return out
+	}
+	for _, t := range w.Traders {
+		if !w.traderInSystem(t, starID) {
+			continue
+		}
+		x, y := t.GetFlightPoint()
+		out = append(out, SysShip{Kind: 1, X: x, Y: y, TX: t.Flight.Bx, TY: t.Flight.By, To: t.ToPlanet, Phase: t.Phase})
+	}
+	for _, c := range w.Caravans {
+		if !w.caravanInSystem(c, starID) {
+			continue
+		}
+		x, y := GetFlightPointCommon(&c.Flight, c.Progress)
+		out = append(out, SysShip{Kind: 2, X: x, Y: y, TX: c.Flight.Bx, TY: c.Flight.By, To: c.ToPlanet, Phase: c.Phase})
+	}
+	for _, d := range w.Diplomats {
+		if !w.diplomatInSystem(d, starID) {
+			continue
+		}
+		k := 3
+		if d.Role == DiplomatRoleBanker {
+			k = 4
+		}
+		x, y := GetFlightPointCommon(&d.Flight, d.Progress)
+		out = append(out, SysShip{Kind: k, X: x, Y: y, TX: d.Flight.Bx, TY: d.Flight.By, To: d.ToPlanet, Phase: d.Phase})
+	}
+	// Пираты: координат полёта в структуре нет — висят у логова.
+	for _, p := range w.Pirates {
+		if !p.Alive {
+			continue
+		}
+		if p.BasePlanet < 0 || p.BasePlanet >= len(w.Planets) {
+			continue
+		}
+		if w.Planets[p.BasePlanet].StarID != starID {
+			continue
+		}
+		x, y := w.getPlanetPos(w.Planets[p.BasePlanet], w.Day)
+		out = append(out, SysShip{Kind: 5, X: x, Y: y, TX: x, TY: y, To: p.BasePlanet, Phase: p.Phase})
+	}
+	return out
 }

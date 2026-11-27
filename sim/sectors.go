@@ -2,18 +2,18 @@ package sim
 
 import "math"
 
-// SectorGridN — было 9×9 = 81. Теперь 10×6 = 60.
+// SectorGridN — было 9×9 = 81. Теперь 9×8 = 72.
 const (
 	SectorGridCols = 9
 	SectorGridRows = 8
-	SectorCount    = SectorGridCols * SectorGridRows // 60
+	SectorCount    = SectorGridCols * SectorGridRows // 72
 	SectorJitter   = 0.20
 	SectorNeighR   = 60.0
 )
 
 const MstMaxEdge = 35.0 // тест: порог ребра MST (прыжок ≤35)
 
-// genSectorSeeds — 81 семя: сетка 9×9 по полю MapW×MapH, с джиттером ±20% шага.
+// genSectorSeeds — 72 семени: сетка 9×8 по полю MapW×MapH, с джиттером ±20% шага.
 func (w *World) genSectorSeeds() {
 	stepX := MapW / float64(SectorGridCols)
 	stepY := MapH / float64(SectorGridRows)

@@ -140,7 +140,7 @@ type Star struct {
 	SystemRadius 	float64
 	Owner        	OwnerId
 	IsOrphan 	 	bool // помечена как сирота, не переносится reassignOrphans
-	Sector      	int // 0..80 (9×9), считается в NewWorld по SectorOf
+	Sector      	int // 0..71 (9×8), считается в NewWorld по SectorOf
 	ConstellationID int // номер MST-компоненты (0..K-1)
 }
 
@@ -173,6 +173,11 @@ type Planet struct {
 	SickDay   		   int // подряд тиков Medicine < 10% TargetStock (болезни)
 	SurplusDay         [GoodCount]int // внутреннее: подряд тиков Count max
 	DeficitDay         [GoodCount]int // внутреннее: подряд тиков Count zero
+	ProducedMask       uint64 // биты: планета производит товар g (prod > cons). Считается в applyProduction.
+	ConsumedMask       uint64 // биты: планета потребляет товар g (cons > prod). Считается в applyProduction.
+	TradeRep [GoodCount]float64 // репутация планеты по каждому товару: >0 — продажи
+	                              // тут удачны, <0 — нет. Накапливается караванами.
+
 }
 
 type World struct {
@@ -185,7 +190,7 @@ type World struct {
 	PlanetMap map[int][]*Planet
 	Neighbors map[int][]int
 	DistMatrix [][]float64
-	SectorSeeds     []SectorSeed // 81 семя (9×9), генерация в NewWorld
+	SectorSeeds     []SectorSeed // 72 семени (9×8), генерация в NewWorld
 	SectorNeighbors [][]int      // 81, соседи по расстоянию семян (порог 60)
 	ConstellationEdges [][]Edge // [81] сектор → рёбра MST (звёзды)
 	ConstellationStars [][]int // [componentID] → []starID
@@ -217,6 +222,7 @@ type World struct {
 	Chat *ChatStore
 	Shm      *SharedMem // разделяемая память для viewer.exe (nil — выключено)
 	ViewStar int        // какая звезда пишется в снимок (для viewer)
+	ShmDay   int        // день последней записи в шард (раз в день = 2048 тиков)
 
 	Rel     Relations
 	BaseRel Relations
@@ -242,6 +248,22 @@ type World struct {
 
 	MMOReady bool // мир дорос до GTL 4, можно пускать игроков
 
+	// SystemMarketSnaps — агрегированный спрос/предложение по звёздным системам.
+	// Пересчитывается раз в день в phaseEconomy после applyProduction/UpdateMarketState.
+	SystemMarketSnaps []SystemMarketSnapshot
+
+	// ... существующие поля ...
+	DistMax   float64 // максимум DistMatrix, считается при генерации мира
+	TickCount int64   // общий счётчик тиков симуляции
+	
+}
+
+// SystemMarketSnapshot — снимок рынка звёздной системы (сумма по всем обитаемым планетам).
+type SystemMarketSnapshot struct {
+	StarID       int
+	SurplusGoods map[Good]int // сумма (Count - TargetStock) где > 0
+	DeficitGoods map[Good]int // сумма планет с BaseSalePrice > 1.15*base
+	UpdatedDay   int          // день свежести
 }
 
 type Event struct {
@@ -375,7 +397,7 @@ func NewWorld(seed int64) *World {
 		}
 	}
 	
-	// Сектора: 81 семя (9×9, джиттер ±20%), соседи по расстоянию, Star.Sector.
+	// Сектора: 72 семени (9×8, джиттер ±20%), соседи по расстоянию, Star.Sector.
 	w.genSectorSeeds()
 	w.buildSectorNeighbors()
 	for _, s := range w.Stars {
@@ -421,6 +443,16 @@ func NewWorld(seed int64) *World {
 			w.DistMatrix[i][j] = math.Sqrt(dx*dx + dy*dy)
 		}
 	}	
+
+	w.DistMax = 0
+	for i := range w.DistMatrix {
+		for j := range w.DistMatrix[i] {
+			if w.DistMatrix[i][j] > w.DistMax {
+				w.DistMax = w.DistMatrix[i][j]
+			}
+		}
+	}
+
 
 	w.buildConstellations()
 	// w.reassignOrphans() // <-- добавляем сюда

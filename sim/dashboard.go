@@ -157,17 +157,28 @@ func (w *World) RenderDashboard(took time.Duration) string {
 
 	// Caravans: гистограмма TL
 	caravanTLHist := [16]int{}
+	var totalHistLen, maxHistLen int
 	for _, c := range w.Caravans {
 		tl := c.TechLevel
 		if tl < 0 { tl = 0 }
 		if tl > 15 { tl = 15 }
 		caravanTLHist[tl]++
+		if c.HistoryLen > 0 {
+			totalHistLen += c.HistoryLen
+			if c.HistoryLen > maxHistLen {
+				maxHistLen = c.HistoryLen
+			}
+		}
 	}
 	cvParts := []string{}
 	for tl := 0; tl < 16; tl++ {
 		if caravanTLHist[tl] > 0 {
 			cvParts = append(cvParts, fmt.Sprintf("%d:%d", tl, caravanTLHist[tl]))
 		}
+	}
+	avgHistLen := 0
+	if len(w.Caravans) > 0 {
+		avgHistLen = totalHistLen / len(w.Caravans)
 	}
 
 	// Caravans: фазы (Land / LocalFly / Refuel / StarFly / Jump / Other)
@@ -316,7 +327,7 @@ func (w *World) RenderDashboard(took time.Duration) string {
 	// Carvans (rows 12–13)
 	put(12, fmt.Sprintf("%-10s%d   money=%.3e   AvgTech=%.3f   deaths: fuel=%d cargo=%d",
 		"carvans:", len(w.Caravans), caravanMoney, w.techDiscountCaravans(-1), w.DeathsFuel, w.DeathsMoney))
-	put(13, fmt.Sprintf("history: %s", strings.Join(cvParts, " ")))
+	put(13, fmt.Sprintf("history: %s    hist: avg=%d max=%d", strings.Join(cvParts, " "), avgHistLen, maxHistLen))
 
 	// Cphases (row 14)
 	put(14, fmt.Sprintf("%-10sLand=%d  LocalFly=%d  Refuel=%d  StarFly=%d  Jump=%d  Other=%d",
@@ -326,11 +337,11 @@ func (w *World) RenderDashboard(took time.Duration) string {
 	put(15, strings.Repeat("-", 76))
 
 	// Pirates (row 16)
-	put(16, fmt.Sprintf("%-10s%d   deaths: pirate=%d   looted=%d   lairMoney=%.3e",
-		"pirates:", piratesAlive, w.DeathsPirate, w.LootedCargo, lairMoney))
+	put(16, fmt.Sprintf("%-10s%d   deaths carvans by pirate=%d   looted carvans=%d",
+		"pirates:", piratesAlive, w.DeathsPirate, w.LootedCargo))
 
 	// Pirates hist (row 17)
-	put(17, fmt.Sprintf("history: %s", strings.Join(pirParts, " ")))
+	put(17, fmt.Sprintf("history: %s    lairMoney=%.3e", strings.Join(pirParts, " "), lairMoney))
 
 	// Pphases (row 18)
 	put(18, fmt.Sprintf("%-10sIdle=%d  Orbit=%d  Chase=%d  Attack=%d  Return=%d",

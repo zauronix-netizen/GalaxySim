@@ -44,6 +44,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/mmo/spawn", s.handleMMOSpawn)
 	mux.HandleFunc("/mmo/despawn", s.handleMMODespawn)
 	mux.HandleFunc("/mmo/ships", s.handleMMOShips)
+	mux.HandleFunc("/mmo/systemobj", s.handleSystemObjects)
+	mux.HandleFunc("/caravan/", s.handleCaravan)
 	mux.HandleFunc("/", s.handleIndex)
 }
 
@@ -160,6 +162,22 @@ func (s *Server) handleMMOShips(w http.ResponseWriter, r *http.Request) {
 	s.World.Ships.Mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleSystemObjects — корабли в системе для карты чата: позиция + цель.
+// Планеты и звезду карта знает из /system, здесь только движущиеся корабли.
+func (s *Server) handleSystemObjects(w http.ResponseWriter, r *http.Request) {
+	sysID, err := strconv.Atoi(r.URL.Query().Get("system"))
+	if err != nil {
+		http.Error(w, "bad system id", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"day":   s.World.Day,
+		"star":  sysID,
+		"ships": s.World.MapShips(sysID),
+	})
 }
 
 func (s *Server) handleMMOState(w http.ResponseWriter, r *http.Request) {
@@ -357,6 +375,107 @@ func (s *Server) handleLair(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+type TraderHistoryJSON struct {
+	SourceID       int     `json:"sourceId"`
+	DestinationID  int     `json:"destId"`
+	Good           int     `json:"good"`
+	Price          float64 `json:"price"`
+	FineTrade      bool    `json:"fineTrade"`
+	Reason         string  `json:"reason"`
+	Day            int     `json:"day"`
+}
+
+type TraderJSON struct {
+	ID          int                `json:"id"`
+	Race        int                `json:"race"`
+	TechLevel   int                `json:"techLevel"`
+	FromPlanet  int                `json:"fromPlanet"`
+	ToPlanet    int                `json:"toPlanet"`
+	Phase       int                `json:"phase"`
+	Good        int                `json:"good"`
+	Cargo       int                `json:"cargo"`
+	CargoMax    int                `json:"cargoMax"`
+	Money       float64            `json:"money"`
+	Fuel        float64            `json:"fuel"`
+	History     []TraderHistoryJSON `json:"history"`
+	HistoryLen  int                `json:"historyLen"`
+}
+
+type CaravanHistoryJSON struct {
+	SourceID       int     `json:"sourceId"`
+	DestinationID  int     `json:"destId"`
+	Good           int     `json:"good"`
+	BuyPrice       float64 `json:"buyPrice"`
+	SellPrice      float64 `json:"sellPrice"`
+	FineTrade      bool    `json:"fineTrade"`
+	Reason         string  `json:"reason"`
+	Day            int     `json:"day"`
+}
+
+type CaravanJSON struct {
+	ID          int                `json:"id"`
+	Race        int                `json:"race"`
+	TechLevel   int                `json:"techLevel"`
+	FromPlanet  int                `json:"fromPlanet"`
+	ToPlanet    int                `json:"toPlanet"`
+	Phase       int                `json:"phase"`
+	Good        int                `json:"good"`
+	Cargo       int                `json:"cargo"`
+	CargoMax    int                `json:"cargoMax"`
+	Money       float64            `json:"money"`
+	Fuel        float64            `json:"fuel"`
+	History     []CaravanHistoryJSON `json:"history"`
+	HistoryLen  int                `json:"historyLen"`
+}
+
+func (s *Server) handleCaravan(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/caravan/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 0 || id >= len(s.World.Caravans) {
+		http.Error(w, "bad caravan id", http.StatusBadRequest)
+		return
+	}
+	c := s.World.Caravans[id]
+	if c == nil || !c.Alive {
+		http.Error(w, "caravan not found", http.StatusNotFound)
+		return
+	}
+	
+	history := make([]CaravanHistoryJSON, 0, c.HistoryLen)
+	for i := 0; i < c.HistoryLen; i++ {
+		idx := (c.HistoryHead - c.HistoryLen + i + sim.CaravanHistorySize) % sim.CaravanHistorySize
+		e := c.History[idx]
+		history = append(history, CaravanHistoryJSON{
+			SourceID:       e.SourceID,
+			DestinationID:  e.DestinationID,
+			Good:           int(e.Good),
+			BuyPrice:       e.BuyPrice,
+			SellPrice:      e.SellPrice,
+			FineTrade:      e.FineTrade,
+			Reason:         e.Reason,
+			Day:            e.Day,
+		})
+	}
+
+	out := CaravanJSON{
+		ID:         c.ID,
+		Race:       int(c.Race),
+		TechLevel:  c.TechLevel,
+		FromPlanet: c.FromPlanet,
+		ToPlanet:   c.ToPlanet,
+		Phase:      c.Phase,
+		Good:       int(c.Good),
+		Cargo:      c.Cargo,
+		CargoMax:   c.CargoMax,
+		Money:      c.Money,
+		Fuel:       c.Fuel,
+		History:    history,
+		HistoryLen: c.HistoryLen,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 func (s *Server) handleMMODespawn(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -419,6 +538,7 @@ type MarketJSON struct {
 	Base          int     `json:"base"`
 	Legal         bool    `json:"legal"`
 	Delta         float64 `json:"delta"`
+	TradeRep      float64 `json:"tradeRep"`
 }
 
 type PlanetJSON struct {
@@ -753,6 +873,7 @@ func (s *Server) handlePlanet(w http.ResponseWriter, r *http.Request) {
 			Base:          p.BaseStock[g],
 			Legal:         s.World.IsLegal(p, sim.Good(g)),
 			Delta:         m.Delta,
+			TradeRep:      p.TradeRep[g],
 		}
 	}
 	// Порядок вывода для веба: GoodsTextOrder (продукты, медикаменты, алкоголь, ...).
